@@ -31,6 +31,7 @@ class NormalizedEmail:
     attachments: list[Attachment] = field(default_factory=list)
     labels: list[str] = field(default_factory=list)
     raw_sha256: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

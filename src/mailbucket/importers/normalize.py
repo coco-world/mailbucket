@@ -98,4 +98,5 @@ def normalize(raw: bytes, **source) -> NormalizedEmail:
         attachments=attachments,
         labels=[s.strip() for s in labels if s.strip()],
         raw_sha256=sha256(raw),
+        headers={name: header(name) for name in ("Reply-To", "In-Reply-To", "References")},
     )

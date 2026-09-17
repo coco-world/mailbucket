@@ -80,15 +80,17 @@ def merge_attachments(
                 # Build in isolation: corrupt input must not partially alter the final document.
                 part = PdfWriter()
                 if options.cover_pages:
+                    details = [("Original-Dateiname", attachment.filename)]
+                    if "subject" in options.pdf.fields:
+                        details.append(("E-Mail", mail.subject))
+                    if "message_id" in options.pdf.fields:
+                        details.append(("Message-ID", mail.message_id or "(fehlt)"))
+                    details.extend(
+                        [("MIME-Type", attachment.mime_type), ("SHA-256", attachment.sha256)]
+                    )
                     cover = document(
                         f"ANHANG {index} VON {len(mail.attachments)}",
-                        [
-                            ("Original-Dateiname", attachment.filename),
-                            ("E-Mail", mail.subject),
-                            ("Message-ID", mail.message_id or mail.raw_sha256),
-                            ("MIME-Type", attachment.mime_type),
-                            ("SHA-256", attachment.sha256),
-                        ],
+                        details,
                     )
                     part.append(PdfReader(BytesIO(cover)), import_outline=False)
                 for page in reader.pages:

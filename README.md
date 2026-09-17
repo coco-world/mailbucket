@@ -1,6 +1,6 @@
 # MailBucket
 
-**Mail Archive Search & PDF Export — vollständig lokal.**
+**Durchsucht Mailboxes nach Suchbegriffen und legt Suchbegriffordner an.**
 
 MailBucket durchsucht E-Mail-Archive nach frei wählbaren Begriffen und exportiert
 Treffer als einzelne, chronologisch nummerierte PDFs in passende Ordner („Buckets“).
@@ -31,15 +31,18 @@ mailbucket
 - Takeout: ZIP, TAR, TAR.GZ und TGZ direkt einlesen; beliebige verschachtelte
   `.mbox`-Dateinamen, Gmail-Labels aus `X-Gmail-Labels`.
 - Ein Suchbegriff pro Zeile; alternativ UTF-8-TXT oder validierte CSV mit Bucket-Zuordnungen.
-- Suche ohne Beachtung der Groß-/Kleinschreibung in Betreff, Body, Absender,
-  Empfängern, CC, Anhangnamen und Labels; Felder einzeln abschaltbar.
+- Gruppierte Suchfelder mit einzeln auswählbarem Betreff, Body, Absendername/-Adresse,
+  Empfängern, CC/BCC, Anhangnamen, Labels, Message-ID, Ordnerpfad und Antwort-Headern.
+- Optionale lokale Anhangsuche in Text, HTML und textbasierten PDFs; Fundstellen im Manifest.
 - Dry Run zählt Treffer und Duplikate, ohne Ausgabeordner oder PDFs anzulegen.
 - Chronologische Sortierung, stabile Nummerierung, optional Datum im Dateinamen.
-- Lesbare PDFs mit Herkunft, Headern, Treffern und Anhanginventar.
+- PDFs im Outlook-Memo-Stil mit einzeln wählbaren Maildaten und technischen Metadaten.
+- Konfigurierbare Fußzeilen einschließlich finaler Seitenzahl und Exportdateiname.
 - PDF-Originalseiten anhängen, JPEG/PNG proportional einfügen, optionale Trennblätter.
 - Originalanhänge bytegetreu speichern, sichere Namen ohne stilles Überschreiben.
 - Manifest, SHA-256-Hashes, Laufparameter und Fehlerprotokoll.
 - Fortschrittsanzeige; längere Vorgänge laufen außerhalb der UI-Ereignisschleife.
+- Lokales Logo, gespeicherte Such-/Exportoptionen und Auswahlhilfen für PDF-Einstellungen.
 
 **Screenshot-Platzhalter:** Hier kann ein Screenshot der lokalen Oberfläche mit
 rein synthetischen Daten ergänzt werden.
@@ -70,14 +73,14 @@ Reste verbleiben. Normales Löschen ist kein sicheres Überschreiben des Datentr
 
 ## Unterstützte Formate
 
-| Quelle | Version 0.1 |
+| Quelle | Version 0.2 |
 | --- | --- |
 | `.mbox` | Ja, auch mehrere Dateien in einem Verzeichnis |
 | `.eml` / EML-Ordner | Ja, rekursiv, Groß-/Kleinschreibung der Erweiterung egal |
 | Maildir | Ja, `cur`, `new`, `tmp` und Unter-Maildirs; `tmp` wird nicht importiert |
 | Takeout `.zip`, `.tar`, `.tar.gz`, `.tgz` | Ja, automatische rekursive MBOX-Erkennung |
 | Entpacktes Takeout-Verzeichnis | Ja, rekursive MBOX-Suche |
-| `.emlx`, `.msg`, `.pst`, `.ost` | Adapter vorgesehen, noch kein Import in 0.1 |
+| `.emlx`, `.msg`, `.pst`, `.ost` | Adapter vorgesehen, noch kein Import in 0.2 |
 
 Entpackte MBOX-Dateien erscheinen im Manifest als `MBOX`; bei Archivimporten
 stehen `Google Takeout`, Archivpfad und interner Memberpfad getrennt im Manifest.
@@ -195,10 +198,68 @@ mailbucket --host 127.0.0.1 --port 8081 --no-browser
 7. Ergebnis, Protokoll und **Ausgabeordner öffnen** nutzen.
 
 Während eines Laufs sind Startbuttons und Formular gesperrt. Die Fortschrittsanzeige
-zeigt gelesene Nachrichten; eine Gesamtzahl wird beim Streaming-Import nicht vorab
-ermittelt, daher ist der Balken dort unbestimmt. Bei PDF-Erzeugung ist die Trefferzahl bekannt.
+zeigt die Phase, aktuelle Mailbox, Suchbegriffe, geprüfte Nachrichten, gefundene Mails
+und exportierte PDFs (einschließlich Kopien in mehreren Buckets). Alle ausgewählten
+Begriffe werden pro Nachricht gemeinsam geprüft; beim Export stehen die Begriffe des
+gerade bearbeiteten Buckets in der Anzeige. Eine Gesamtzahl wird beim Streaming-Import
+nicht vorab ermittelt, daher ist der Balken dort unbestimmt. Bei PDF-Erzeugung ist die
+Trefferzahl bekannt; die Prozentanzeige bezieht sich auf die jeweils angezeigte Phase.
+Scrollen, Fortschritt und Ergebnisansicht bleiben bedienbar.
 Ein bestehender Laufordner erzeugt einen Fehler und wird niemals wiederverwendet.
 Nach erfolgreichem Export schlägt das UI einen freien Namen mit numerischem Suffix vor.
+
+## Suchfelder und Fundstellen
+
+Standardmäßig sind Betreff, Body, Absendername, Absender-E-Mail-Adresse und An aktiviert.
+CC, BCC, Gmail-Labels, Anhangnamen/-inhalte, Message-ID, Mailbox-/Ordnerpfad sowie
+Reply-To, In-Reply-To und References sind optional. „Message-ID / Internet Message ID“
+ist eine gemeinsame Option, weil beide Bezeichnungen denselben Header meinen.
+BCC ist nur durchsuchbar, wenn es in der exportierten Nachricht vorhanden ist.
+Outlook-Ordner/Kategorien und interne UIDs werden mangels entsprechender Importer nicht angeboten.
+
+Anhanginhalte werden nur bei aktivierter Option extrahiert: Textdateien (UTF-8,
+UTF-16 mit BOM, ersatzweise Windows-1252), HTML und vorhandener PDF-Text. Keine OCR,
+Office- oder Archiv-Inhaltssuche. Originalbytes bleiben unverändert. Die Suche ist
+pro Anhang auf 20 MiB, 500 PDF-Seiten und 2 Millionen extrahierte Zeichen begrenzt.
+Überschreitungen sowie beschädigte/verschlüsselte Anhänge erscheinen im Protokoll;
+bei Erreichen einer Grenze kann ein Treffer außerhalb des geprüften Bereichs fehlen.
+`match_locations` im Manifest nennt für jeden Begriff die tatsächlichen Suchfelder,
+bei Anhanginhalten zusätzlich den Anhangnamen.
+
+## PDF-Inhalt, Fußzeile und gespeicherte Einstellungen
+
+Der Standard-Memo-Kopf enthält Von, Gesendet, An, Cc, Betreff und eine kompakte
+Anlagenliste. Danach folgt der Nachrichtentext. Jede dieser Angaben sowie BCC kann
+einzeln ausgeblendet werden. Optionale technische Angaben (Herkunft, Message-ID,
+Labels, Antwort-Header) und MailBucket-Daten (Treffer, Fundstellen, Exportzeitpunkt,
+Version) stehen in einem abgegrenzten Bereich **MailBucket-Metadaten** hinter dem Text.
+„Alle auswählen“, „Alle abwählen“ und „Standard wiederherstellen“ erleichtern die Auswahl.
+Die Sichtbarkeitseinstellungen bearbeiten weder den Nachrichtentext noch den Inhalt
+übernommener Originalanhänge; dort vorhandene Werte können daher weiterhin sichtbar sein.
+Das Manifest dokumentiert unabhängig von der PDF-Auswahl weiterhin die Herkunft und Hashes.
+
+Die Fußzeile ist vollständig abschaltbar. Einzeln wählbar sind MailBucket, Exportdatum,
+Maildatum, Suchbegriffe, Mailbox, Seite/Gesamtseiten und tatsächlicher Exportdateiname.
+Standard: MailBucket und Seitenzahl. Die Seitenzählung erfolgt nach der Integration
+aller Anhänge. Es wird unter jeder Seite ein zusätzlicher Bereich angelegt, damit
+kein Anhanginhalt überdeckt wird. **Dadurch wird die exportierte Seite etwas höher**;
+beim Drucken auf A4 ggf. „An Seite anpassen“ verwenden. Originalanhänge im
+attachments-Verzeichnis behalten ihre ursprünglichen Maße und Bytes. Lange Fußzeilen
+brechen um; einzelne Werte werden auf 240 Zeichen begrenzt. Vollständige Werte stehen
+weiterhin in Mail-Metadaten bzw. Manifest. Bereits im Original-PDF enthaltene Fußzeilen bleiben erhalten.
+
+„Einstellungen speichern“ oder der Start eines Laufs speichert Suchfelder, Duplikat-,
+Anhang- und PDF-Optionen lokal für den nächsten Start. Quellen, Suchbegriffe und
+Ausgabepfade werden nicht gespeichert. Speicherorte:
+
+- Windows: `%APPDATA%\MailBucket\settings.json`
+- macOS: `~/Library/Application Support/MailBucket/settings.json`
+- Linux: `$XDG_CONFIG_HOME/MailBucket/settings.json` bzw. `~/.config/MailBucket/settings.json`
+
+Für portable Installationen und Tests überschreibt `MAILBUCKET_SETTINGS_PATH` den
+vollständigen Dateipfad. Ungültige Einstellungen werden protokolliert und durch
+Standards ersetzt. Das mitgelieferte Logo wird aus den Paket-Assets geladen; bei
+fehlendem Paketlogo wird im Projektordner `assets` nach einem Logo gesucht.
 
 ## Google Takeout
 
@@ -275,10 +336,11 @@ Entfernung die erkannten Duplikate.
 ```
 
 Mit Zeitstempel beispielsweise `345678_0001_20260915_215700.pdf`.
-Für jede Mail wird einmal gerendert und das Ergebnis in die passenden Buckets kopiert.
-Der PDF-Header nennt deshalb alle gefundenen Begriffe; das Manifest nennt pro Zeile
-nur die Begriffe des jeweiligen Buckets. Trennblätter identifizieren die E-Mail über
-Betreff und Message-ID bzw. Rohdatenhash, damit die PDF bucketübergreifend wiederverwendbar bleibt.
+Standard-PDFs werden einmal pro Mail gerendert und in die passenden Buckets kopiert.
+Wenn Treffer/Fundstellen oder bucketabhängige Fußzeilen gewählt sind, enthält jede PDF
+die Begriffe ihres Buckets und den passenden Dateinamen. Reine Fußzeilenvarianten nutzen
+denselben gerenderten Memo-Inhalt wieder. Trennblätter übernehmen Betreff bzw. Message-ID
+nur bei aktivierter PDF-Auswahl dieser Felder.
 
 PDF-Anhangmodi:
 
@@ -290,7 +352,7 @@ JPEG/PNG können proportional als Seiten eingefügt werden. Andere Formate werde
 mit einem Hinweis dokumentiert. Mit **Originalanhänge zusätzlich speichern** bleiben
 auch DOCX/XLSX/ZIP usw. verfügbar; ohne diese Option nennt der Hinweis ausdrücklich,
 dass die Datei nicht gespeichert wurde. Bei ausgeschalteter Anhangverarbeitung bleibt
-nur das Inventar im Mail-PDF. Defekte oder verschlüsselte PDFs werden protokolliert;
+nur die optional ausgewählte Anlagenliste im Mail-PDF. Defekte oder verschlüsselte PDFs werden protokolliert;
 andere Mails werden weiter verarbeitet. Gleiche Anhangnamen erhalten nummerierte Suffixe.
 
 `_manifest.csv` ist UTF-8 mit einer Zeile pro Bucket-Mail. Es enthält Metadaten,
@@ -308,10 +370,11 @@ Teilweise fehlgeschlagene Läufe bleiben zur Prüfung erhalten und werden nicht 
 src/mailbucket/
 ├── app.py, __main__.py       # UI und CLI
 ├── models.py, config.py      # gemeinsames Modell und Laufparameter
+├── settings.py, branding.py  # lokale Optionen und Logo-Erkennung
 ├── pipeline.py              # Streaming, Treffer-Spool, Sortierung, Export
 ├── importers/               # Normalisierung, EML, MBOX, Maildir, Takeout, Protocol
-├── search/                  # ContainsMatcher, TXT/CSV, Dedup
-├── export/                  # PDFs, Anhänge, Manifest, Laufmetadaten
+├── search/                  # ContainsMatcher, Anhangtext, TXT/CSV, Dedup
+├── export/                  # Memo-PDFs, Fußzeilen, Anhänge, Manifest, Laufmetadaten
 └── utils/                   # Daten, Dateinamen, Text, Hashes
 ```
 
@@ -351,14 +414,15 @@ ruff format --check src tests
 
 Tests prüfen MIME/HTML/Unicode, Adressen, Labels, Suchfelder, CSV-Validierung,
 Duplikate, Datumsreihenfolge, Pfadbereinigung, Archiv-Traversal und Links,
-PDF-Inhalte, defekte Anhänge sowie einen vollständigen MBOX-zu-Bucket-Lauf
-mit Hashprüfung und Überschreibschutz.
+PDF-Inhalte, einzeln auswählbare Metadaten/Fußzeilen, Seitenzählung mit Anhängen,
+defekte Anhänge, gespeicherte Optionen sowie MBOX-/Takeout-zu-Bucket-Läufe
+mit Hashprüfung, Fundstellen und Überschreibschutz.
 
 ## Bekannte Einschränkungen
 
 - Keine Office-Konvertierung, OCR, Regex-, Wortgrenzen- oder exakte Suche.
-- Keine EMLX/MSG/PST/OST-Importer in 0.1, keine Passwortentschlüsselung von Archiven/PDFs.
-- PDF ist eine dokumentarische Textansicht, keine HTML-/Outlook-Nachbildung.
+- Keine EMLX/MSG/PST/OST-Importer in 0.2, keine Passwortentschlüsselung von Archiven/PDFs.
+- PDF verwendet einen Outlook-ähnlichen Memo-Kopf und lesbaren Text; HTML-Layout wird nicht nachgebildet.
   ReportLabs eingebettete Vera-Schrift unterstützt deutsche Umlaute und zahlreiche
   lateinische Zeichen; CJK, Emoji und komplexe Schreibrichtungen sind nicht vollständig abgedeckt.
 - Es wird höchstens eine Mail einschließlich ihrer Anhänge vollständig im RAM gehalten;

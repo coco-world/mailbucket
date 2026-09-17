@@ -2,9 +2,12 @@
 
 import csv
 import io
+from dataclasses import dataclass
+from email.utils import getaddresses
 
-from mailbucket.config import SEARCH_FIELDS
+from mailbucket.config import DEFAULT_SEARCH_FIELDS, SEARCH_FIELDS
 from mailbucket.models import NormalizedEmail, SearchTerm
+from mailbucket.search.attachment_text import attachment_text
 from mailbucket.utils.text import html_to_text
 
 
@@ -35,26 +38,58 @@ def parse_csv(text: str) -> list[SearchTerm]:
     return list(dict.fromkeys(result))
 
 
+@dataclass
+class MatchResult:
+    buckets: dict[str, list[str]]
+    locations: dict[str, list[str]]
+
+
 class ContainsMatcher:
-    def __init__(self, terms: list[SearchTerm], fields: tuple[str, ...] = SEARCH_FIELDS):
+    def __init__(self, terms: list[SearchTerm], fields: tuple[str, ...] = DEFAULT_SEARCH_FIELDS):
+        if set(fields) - set(SEARCH_FIELDS):
+            raise ValueError("Unbekanntes Suchfeld.")
         self.terms = [(t, t.term.casefold()) for t in terms]
         self.fields = fields
 
     def match(self, mail: NormalizedEmail) -> dict[str, list[str]]:
+        return self.match_details(mail).buckets
+
+    def match_details(self, mail: NormalizedEmail) -> MatchResult:
+        """Record actual fields for each term while extracting attachments only once per mail."""
+        senders = getaddresses([mail.sender])
         values = {
             "subject": mail.subject,
             "from": mail.sender,
+            "sender_name": "\n".join(name for name, _ in senders),
+            "sender_email": "\n".join(address for _, address in senders),
             "to": "\n".join(mail.to),
             "cc": "\n".join(mail.cc),
+            "bcc": "\n".join(mail.bcc),
             "body": mail.body_text,
             "attachment_names": "\n".join(a.filename for a in mail.attachments),
             "labels": "\n".join(mail.labels),
+            "message_id": mail.message_id or "",
+            "source_folder": mail.source_folder or "",
+            "reply_to": mail.headers.get("Reply-To", ""),
+            "in_reply_to": mail.headers.get("In-Reply-To", ""),
+            "references": mail.headers.get("References", ""),
         }
         if "body" in self.fields and mail.body_html:
             values["body"] += "\n" + html_to_text(mail.body_html)
-        haystacks = [values[f].casefold() for f in self.fields]
+        haystacks = {f: values[f].casefold() for f in self.fields if f != "attachment_content"}
+        attachment_values = (
+            [(a.filename, attachment_text(a).casefold()) for a in mail.attachments]
+            if "attachment_content" in self.fields
+            else []
+        )
         matches: dict[str, list[str]] = {}
+        locations: dict[str, list[str]] = {}
         for term, needle in self.terms:
-            if any(needle in value for value in haystacks):
+            found = [f for f, value in haystacks.items() if needle in value]
+            found.extend(
+                f"attachment_content:{name}" for name, text in attachment_values if needle in text
+            )
+            if found:
                 matches.setdefault(term.bucket, []).append(term.term)
-        return matches
+                locations[term.term] = found
+        return MatchResult(matches, locations)

@@ -16,6 +16,7 @@ COLUMNS = [
     "source_index",
     "gmail_labels",
     "matched_terms",
+    "match_locations",
     "pdf_file",
     "pdf_sha256",
     "attachment_count",

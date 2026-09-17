@@ -1,6 +1,8 @@
 """Documentary, offline PDF rendering with an embedded Unicode TrueType font."""
 
 import threading
+from dataclasses import dataclass, field
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -11,15 +13,17 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
 
+from mailbucket import __version__
+from mailbucket.config import PDF_LABELS, SEARCH_LABELS, PdfOptions
 from mailbucket.models import NormalizedEmail
 from mailbucket.utils.text import clean_text
 
 _FONT_LOCK = threading.Lock()
 
 
-def font_name() -> str:
+def font_name(bold: bool = False) -> str:
     # ReportLab ships Vera with a redistribution license on all supported platforms.
     with _FONT_LOCK:
         if "MailBucketVera" not in pdfmetrics.getRegisteredFontNames():
@@ -28,11 +32,52 @@ def font_name() -> str:
                     "MailBucketVera", str(Path(reportlab.__file__).parent / "fonts" / "Vera.ttf")
                 )
             )
-    return "MailBucketVera"
+            pdfmetrics.registerFont(
+                TTFont(
+                    "MailBucketVeraBold",
+                    str(Path(reportlab.__file__).parent / "fonts" / "VeraBd.ttf"),
+                )
+            )
+    return "MailBucketVeraBold" if bold else "MailBucketVera"
+
+
+@dataclass
+class PdfContext:
+    locations: dict[str, list[str]] = field(default_factory=dict)
+    export_time: datetime = field(default_factory=lambda: datetime.now().astimezone())
+    export_file: str = ""
+
+
+def formatted_date(mail: NormalizedEmail) -> str:
+    return (
+        mail.date.strftime("%d.%m.%Y %H:%M:%S %z")
+        if mail.date
+        else (f"Unbekannt / ungültig: {mail.date_raw or 'kein Date-Header'}")
+    )
+
+
+def location_label(value: str) -> str:
+    if value.startswith("attachment_content:"):
+        return "Anhanginhalt: " + value.partition(":")[2]
+    return SEARCH_LABELS.get(value, value)
+
+
+def build_document(story: list, title: str = "E-Mail") -> bytes:
+    target = BytesIO()
+    SimpleDocTemplate(
+        target,
+        pagesize=A4,
+        leftMargin=42,
+        rightMargin=42,
+        topMargin=38,
+        bottomMargin=36,
+        title=title,
+        author="MailBucket",
+    ).build(story)
+    return target.getvalue()
 
 
 def document(title: str, sections: list[tuple[str, str]]) -> bytes:
-    target = BytesIO()
     style = ParagraphStyle(
         "body", fontName=font_name(), fontSize=9, leading=14, spaceAfter=7, splitLongWords=True
     )
@@ -61,53 +106,109 @@ def document(title: str, sections: list[tuple[str, str]]) -> bytes:
             story.append(Paragraph(escape(line).replace("\t", "    ") or "&#160;", style))
         story.append(Spacer(1, 5))
 
-    def footer(canvas, doc):
-        canvas.setFont(font_name(), 8)
-        canvas.setFillColor(colors.HexColor("#52616b"))
-        canvas.drawString(42, 25, "MailBucket | Lokaler E-Mail-Export")
-        canvas.drawRightString(A4[0] - 42, 25, str(doc.page))
-
-    SimpleDocTemplate(
-        target,
-        pagesize=A4,
-        leftMargin=42,
-        rightMargin=42,
-        topMargin=42,
-        bottomMargin=45,
-        title=title,
-        author="MailBucket",
-    ).build(story, onFirstPage=footer, onLaterPages=footer)
-    return target.getvalue()
+    return build_document(story, title)
 
 
-def render_email(mail: NormalizedEmail, matched_terms: list[str]) -> bytes:
-    sections = [
-        (
-            "Datum",
-            mail.date.isoformat(sep=" ")
-            if mail.date
-            else f"Unbekannt / ungültig: {mail.date_raw or '(kein Date-Header)'}",
-        ),
-        ("Von", mail.sender),
-        ("An", "; ".join(mail.to)),
-        ("CC", "; ".join(mail.cc)),
-        ("BCC", "; ".join(mail.bcc)),
-        ("Betreff", mail.subject),
-        ("Message-ID", mail.message_id or "(fehlt)"),
-        ("Quelle", mail.source_type),
-        ("Archiv / Quelldatei", mail.source_file),
-        ("Mailbox", mail.source_folder or ""),
-        ("Position (nullbasiert)", str(mail.source_index)),
-        ("Gmail Labels", ", ".join(mail.labels)),
-        ("Treffer (alle Buckets)", ", ".join(matched_terms)),
-        ("NACHRICHT", mail.body_text or "(Kein lesbarer Nachrichtentext)"),
+def render_email(
+    mail: NormalizedEmail,
+    matched_terms: list[str],
+    options: PdfOptions | None = None,
+    context: PdfContext | None = None,
+) -> bytes:
+    """Outlook-like memo; optional technical metadata follows the readable message."""
+    options = options or PdfOptions()
+    context = context or PdfContext()
+    options.validate()
+    body = ParagraphStyle(
+        "memo-body",
+        fontName=font_name(),
+        fontSize=9.5,
+        leading=14,
+        spaceAfter=3,
+        splitLongWords=True,
+    )
+    header = ParagraphStyle(
+        "memo-header",
+        parent=body,
+        leftIndent=78,
+        bulletIndent=0,
+        bulletFontName=font_name(True),
+        bulletFontSize=9.5,
+        spaceAfter=5,
+    )
+    label = ParagraphStyle(
+        "metadata-label",
+        parent=body,
+        fontName=font_name(True),
+        fontSize=8,
+        leading=12,
+        keepWithNext=True,
+        spaceBefore=7,
+    )
+    metadata = ParagraphStyle("metadata-value", parent=body, fontSize=8, leading=12)
+    story = []
+    headers = [
+        ("from", "Von:", mail.sender),
+        ("date", "Gesendet:", formatted_date(mail)),
+        ("to", "An:", "; ".join(mail.to)),
+        ("cc", "Cc:", "; ".join(mail.cc)),
+        ("bcc", "Bcc:", "; ".join(mail.bcc)),
+        ("subject", "Betreff:", mail.subject),
     ]
-    for index, attachment in enumerate(mail.attachments, 1):
-        sections.append(
-            (
-                f"ANHANG {index}: {attachment.filename}",
-                f"MIME: {attachment.mime_type}\nGröße: {len(attachment.data)} Bytes\n"
-                f"SHA-256: {attachment.sha256}",
+    for key, title, value in headers:
+        if key in options.fields:
+            story.append(Paragraph(escape(clean_text(value)) or "&#160;", header, bulletText=title))
+    if "attachments" in options.fields and mail.attachments:
+        # Separate paragraphs keep very large attachment inventories splittable.
+        for index, attachment in enumerate(mail.attachments):
+            story.append(
+                Paragraph(
+                    escape(clean_text(attachment.filename)) + f" ({len(attachment.data):,} Bytes)",
+                    header,
+                    bulletText="Anlagen:" if index == 0 else None,
+                )
             )
+    if story:
+        story.extend(
+            [
+                Spacer(1, 9),
+                HRFlowable(width="100%", thickness=0.6, color=colors.black),
+                Spacer(1, 14),
+            ]
         )
-    return document("E-MAIL", sections)
+    for line in clean_text(mail.body_text or "(Kein lesbarer Nachrichtentext)").splitlines():
+        story.append(Paragraph(escape(line).replace("\t", "    ") or "&#160;", body))
+    values = {
+        "message_id": mail.message_id or "(fehlt)",
+        "source_type": mail.source_type,
+        "source_file": mail.source_file,
+        "source_filename": Path(mail.source_file).name,
+        "source_folder": mail.source_folder or "",
+        "source_index": str(mail.source_index) if mail.source_index is not None else "",
+        "labels": ", ".join(mail.labels),
+        "matched_terms": ", ".join(matched_terms),
+        "match_locations": "\n".join(
+            f"{term}: {', '.join(location_label(f) for f in fields)}"
+            for term, fields in context.locations.items()
+            if term in matched_terms
+        ),
+        "export_time": context.export_time.strftime("%d.%m.%Y %H:%M:%S %z"),
+        "version": __version__,
+        "reply_to": mail.headers.get("Reply-To", ""),
+        "in_reply_to": mail.headers.get("In-Reply-To", ""),
+        "references": mail.headers.get("References", ""),
+    }
+    selected = [key for key in PDF_LABELS if key in options.fields and key in values]
+    if selected:
+        story.extend(
+            [
+                Spacer(1, 18),
+                HRFlowable(width="100%", thickness=0.4, color=colors.grey),
+                Paragraph("MailBucket-Metadaten", label),
+            ]
+        )
+        for key in selected:
+            story.append(Paragraph(escape(PDF_LABELS[key]), label))
+            for line in clean_text(values[key]).splitlines() or [""]:
+                story.append(Paragraph(escape(line) or "(nicht vorhanden)", metadata))
+    return build_document(story)
