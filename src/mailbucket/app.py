@@ -300,7 +300,7 @@ def create_page() -> None:
             busy = False
             dry_button.enable()
             export_button.enable()
-            form.props(remove="inert").style(remove="opacity")
+            form.props(remove="inert").style(remove="opacity: .65")
             bar.props(remove="indeterminate")
 
     with ui.column().classes("w-full max-w-6xl mx-auto p-4 md:p-8 gap-5"):
