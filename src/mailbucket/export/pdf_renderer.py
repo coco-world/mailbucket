@@ -9,6 +9,7 @@ from xml.sax.saxutils import escape
 
 import reportlab
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
@@ -79,15 +80,15 @@ def build_document(story: list, title: str = "E-Mail") -> bytes:
 
 def document(title: str, sections: list[tuple[str, str]]) -> bytes:
     style = ParagraphStyle(
-        "body", fontName=font_name(), fontSize=9, leading=14, spaceAfter=7, splitLongWords=True
+        "body", fontName=font_name(), fontSize=9, leading=11, spaceAfter=3, splitLongWords=True
     )
     heading = ParagraphStyle(
         "heading",
         parent=style,
         fontSize=17,
-        leading=22,
+        leading=19,
         textColor=colors.HexColor("#134e4a"),
-        spaceAfter=20,
+        spaceAfter=12,
     )
     label = ParagraphStyle(
         "label",
@@ -104,7 +105,7 @@ def document(title: str, sections: list[tuple[str, str]]) -> bytes:
         # Break into paragraphs so arbitrarily long bodies can split across pages.
         for line in clean_text(value).splitlines() or [""]:
             story.append(Paragraph(escape(line).replace("\t", "    ") or "&#160;", style))
-        story.append(Spacer(1, 5))
+        story.append(Spacer(1, 3))
 
     return build_document(story, title)
 
@@ -123,9 +124,19 @@ def render_email(
         "memo-body",
         fontName=font_name(),
         fontSize=9.5,
-        leading=14,
-        spaceAfter=3,
+        leading=11.5,
+        spaceAfter=1,
         splitLongWords=True,
+    )
+    custom_header = ParagraphStyle(
+        "custom-header",
+        parent=body,
+        fontName=font_name(True),
+        fontSize=10.5,
+        leading=12,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor("#134e4a"),
+        spaceAfter=2,
     )
     header = ParagraphStyle(
         "memo-header",
@@ -134,19 +145,24 @@ def render_email(
         bulletIndent=0,
         bulletFontName=font_name(True),
         bulletFontSize=9.5,
-        spaceAfter=5,
+        spaceAfter=3,
     )
     label = ParagraphStyle(
         "metadata-label",
         parent=body,
         fontName=font_name(True),
         fontSize=8,
-        leading=12,
+        leading=10,
         keepWithNext=True,
-        spaceBefore=7,
+        spaceBefore=5,
     )
-    metadata = ParagraphStyle("metadata-value", parent=body, fontSize=8, leading=12)
+    metadata = ParagraphStyle("metadata-value", parent=body, fontSize=8, leading=10)
     story = []
+    header_text = clean_text(options.custom_header)
+    if header_text.strip():
+        for line in header_text.splitlines() or [""]:
+            story.append(Paragraph(escape(line) or "&#160;", custom_header))
+        story.append(Spacer(1, 5))
     headers = [
         ("from", "Von:", mail.sender),
         ("date", "Gesendet:", formatted_date(mail)),
@@ -171,9 +187,9 @@ def render_email(
     if story:
         story.extend(
             [
-                Spacer(1, 9),
+                Spacer(1, 6),
                 HRFlowable(width="100%", thickness=0.6, color=colors.black),
-                Spacer(1, 14),
+                Spacer(1, 9),
             ]
         )
     for line in clean_text(mail.body_text or "(Kein lesbarer Nachrichtentext)").splitlines():
@@ -202,7 +218,7 @@ def render_email(
     if selected:
         story.extend(
             [
-                Spacer(1, 18),
+                Spacer(1, 12),
                 HRFlowable(width="100%", thickness=0.4, color=colors.grey),
                 Paragraph("MailBucket-Metadaten", label),
             ]

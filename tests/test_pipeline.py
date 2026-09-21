@@ -116,3 +116,55 @@ def test_invalid_date_goes_to_manifest(tmp_path, make_mail):
     assert result.stats.exported == 1 and result.stats.warnings == 1
     with (result.output / "_manifest.csv").open(encoding="utf-8") as stream:
         assert next(csv.DictReader(stream))["date_status"] == "missing_or_invalid"
+
+
+def test_no_hit_creates_no_output_folder(tmp_path, make_mail):
+    source = tmp_path / "source.eml"
+    source.write_bytes(make_mail(subject="Kein Treffer").as_bytes())
+    config = RunConfig(
+        [source],
+        parse_csv("term,bucket\nNichtVorhanden,A"),
+        tmp_path / "new-output-root",
+        "run",
+    )
+
+    result = execute(config)
+
+    assert result.output is None
+    assert result.stats.exported == 0
+    assert not config.output_dir.exists()
+
+
+def test_only_hit_buckets_get_excel_csv(tmp_path, make_mail):
+    source = tmp_path / "source.eml"
+    source.write_bytes(
+        make_mail(
+            subject="Alpha",
+            body="Erste Zeile; mit Semikolon\nZweite Zeile mit Umlaut ä",
+        ).as_bytes()
+    )
+    config = RunConfig(
+        [source],
+        parse_csv("term,bucket\nAlpha,Treffer\nNichtVorhanden,Leer"),
+        tmp_path / "out",
+        "run",
+    )
+
+    result = execute(config)
+
+    bucket = result.output / "Treffer"
+    csv_path = bucket / "Treffer.csv"
+    assert bucket.is_dir()
+    assert len(list(bucket.glob("*.pdf"))) == 1
+    assert not (result.output / "Leer").exists()
+    assert csv_path.read_bytes().startswith(b"\xef\xbb\xbf")
+    with csv_path.open(encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream, delimiter=";")
+        rows = list(reader)
+    assert reader.fieldnames == ["Datum", "Uhrzeit", "von", "an", "Text"]
+    assert len(rows) == 1
+    assert rows[0]["Datum"] == "14.09.2026"
+    assert rows[0]["Uhrzeit"] == "08:31:42"
+    assert "Alice Müller" in rows[0]["von"]
+    assert "bob@example.com" in rows[0]["an"]
+    assert "Erste Zeile; mit Semikolon\nZweite Zeile mit Umlaut ä" in rows[0]["Text"]

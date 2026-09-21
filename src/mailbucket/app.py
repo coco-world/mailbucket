@@ -153,6 +153,7 @@ def create_page() -> None:
             save_originals=originals.value,
             cover_pages=covers.value,
             pdf=PdfOptions(
+                custom_header=pdf_header.value or "",
                 fields=tuple(f for f, widget in pdf_widgets.items() if widget.value),
                 footer_enabled=footer_enabled.value,
                 footer_fields=tuple(f for f, widget in footer_widgets.items() if widget.value),
@@ -420,6 +421,17 @@ def create_page() -> None:
                 ):
                     ui.label(
                         "Kompakter Mailkopf, Nachrichtentext und separat auswählbare MailBucket-Metadaten."
+                    )
+                    pdf_header = (
+                        ui.textarea(
+                            "Freier Kopftext für jede exportierte Mail",
+                            value=preferences.export.pdf.custom_header,
+                        )
+                        .props("outlined autogrow rows=2")
+                        .classes("w-full")
+                    )
+                    ui.label("Der Text erscheint oben auf der ersten PDF-Seite.").classes(
+                        "text-xs text-slate-500"
                     )
                     pdf_widgets = {}
                     with ui.row().classes("w-full gap-6 items-start"):

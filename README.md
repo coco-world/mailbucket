@@ -33,6 +33,7 @@ mailbucket
 - Ein Suchbegriff pro Zeile; alternativ UTF-8-TXT oder validierte CSV mit Bucket-Zuordnungen.
 - Gruppierte Suchfelder mit einzeln auswählbarem Betreff, Body, Absendername/-Adresse,
   Empfängern, CC/BCC, Anhangnamen, Labels, Message-ID, Ordnerpfad und Antwort-Headern.
+- Reine Zahlenbegriffe treffen nur außerhalb längerer Zahlenfolgen.
 - Optionale lokale Anhangsuche in Text, HTML und textbasierten PDFs; Fundstellen im Manifest.
 - Dry Run zählt Treffer und Duplikate, ohne Ausgabeordner oder PDFs anzulegen.
 - Chronologische Sortierung, stabile Nummerierung, optional Datum im Dateinamen.
@@ -40,6 +41,8 @@ mailbucket
 - Konfigurierbare Fußzeilen einschließlich finaler Seitenzahl und Exportdateiname.
 - PDF-Originalseiten anhängen, JPEG/PNG proportional einfügen, optionale Trennblätter.
 - Originalanhänge bytegetreu speichern, sichere Namen ohne stilles Überschreiben.
+- Bucket-Ordner nur bei Treffern; je Ordner eine gleichnamige, Excel-taugliche CSV.
+- Freier, gespeicherter Kopftext auf jeder exportierten Mail-PDF.
 - Manifest, SHA-256-Hashes, Laufparameter und Fehlerprotokoll.
 - Fortschrittsanzeige; längere Vorgänge laufen außerhalb der UI-Ereignisschleife.
 - Lokales Logo, gespeicherte Such-/Exportoptionen und Auswahlhilfen für PDF-Einstellungen.
@@ -228,8 +231,10 @@ bei Anhanginhalten zusätzlich den Anhangnamen.
 
 ## PDF-Inhalt, Fußzeile und gespeicherte Einstellungen
 
-Der Standard-Memo-Kopf enthält Von, Gesendet, An, Cc, Betreff und eine kompakte
-Anlagenliste. Danach folgt der Nachrichtentext. Jede dieser Angaben sowie BCC kann
+Ein frei eingebbarer Kopftext erscheint auf Wunsch oben auf jeder exportierten Mail-PDF
+und wird mit den übrigen Optionen gespeichert. Der Standard-Memo-Kopf enthält Von,
+Gesendet, An, Cc, Betreff und eine kompakte Anlagenliste. Danach folgt der Nachrichtentext
+mit engem Zeilenabstand. Jede dieser Angaben sowie BCC kann
 einzeln ausgeblendet werden. Optionale technische Angaben (Herkunft, Message-ID,
 Labels, Antwort-Header) und MailBucket-Daten (Treffer, Fundstellen, Exportzeitpunkt,
 Version) stehen in einem abgegrenzten Bereich **MailBucket-Metadaten** hinter dem Text.
@@ -300,6 +305,8 @@ Bucketnamen werden für Windows/macOS/Linux bereinigt. Bei Namenskollisionen,
 auch durch Groß-/Kleinschreibung, wird ein stabiler Hashsuffix ergänzt. Die Zuordnung
 zwischen Original-Bucket und Verzeichnis steht in `_run.json`.
 
+Reine Ziffernbegriffe verwenden Zifferngrenzen: `123` trifft `A123B`, aber nicht `91235`.
+
 ## Sortierung und Duplikate
 
 Zuerst sammeln, danach sortieren: älteste Mail zuerst. Zeitzonen werden bei der
@@ -325,6 +332,7 @@ Entfernung die erkannten Duplikate.
 ├── _run.json
 ├── _run.log
 ├── 345678/
+│   ├── 345678.csv
 │   ├── 345678_0001.pdf
 │   ├── 345678_0002.pdf
 │   └── attachments/
@@ -332,6 +340,7 @@ Entfernung die erkannten Duplikate.
 │           ├── Rechnung.pdf
 │           └── Angebot.xlsx
 └── Mustermann/
+    ├── Mustermann.csv
     └── Mustermann_0001.pdf
 ```
 
@@ -363,6 +372,12 @@ nicht auf das komplette Archiv. `_run.json` enthält Optionen, Quellen, Zuordnun
 Statistiken und Status (`running`, `complete`, `complete_with_errors`, `failed`).
 `_run.log` enthält Fehler mit Details; das UI zeigt maximal die ersten 100 Einträge.
 Teilweise fehlgeschlagene Läufe bleiben zur Prüfung erhalten und werden nicht überschrieben.
+Ein Lauf ohne Treffer erzeugt keinen Ausgabeordner; Buckets ohne Treffer werden ebenfalls
+nicht angelegt.
+
+Jeder Bucket enthält zusätzlich eine gleichnamige CSV mit den Spalten `Datum`, `Uhrzeit`,
+`von`, `an` und `Text`. Sie verwendet UTF-8 mit BOM und Semikolon als Trennzeichen, damit
+deutsche Excel-Installationen Umlaute und Spalten direkt korrekt erkennen.
 
 ## Architektur und Python-API
 
@@ -420,7 +435,8 @@ mit Hashprüfung, Fundstellen und Überschreibschutz.
 
 ## Bekannte Einschränkungen
 
-- Keine Office-Konvertierung, OCR, Regex-, Wortgrenzen- oder exakte Suche.
+- Keine Office-Konvertierung, OCR, Regex- oder exakte Suche; allgemeine Wortgrenzen sind
+  nicht konfigurierbar. Reine Ziffernbegriffe erhalten automatisch Zifferngrenzen.
 - Keine EMLX/MSG/PST/OST-Importer in 0.2, keine Passwortentschlüsselung von Archiven/PDFs.
 - PDF verwendet einen Outlook-ähnlichen Memo-Kopf und lesbaren Text; HTML-Layout wird nicht nachgebildet.
   ReportLabs eingebettete Vera-Schrift unterstützt deutsche Umlaute und zahlreiche

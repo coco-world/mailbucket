@@ -78,11 +78,14 @@ DEFAULT_FOOTER_FIELDS = ("application", "page_number")
 
 @dataclass
 class PdfOptions:
+    custom_header: str = ""
     fields: tuple[str, ...] = DEFAULT_PDF_FIELDS
     footer_enabled: bool = True
     footer_fields: tuple[str, ...] = DEFAULT_FOOTER_FIELDS
 
     def validate(self) -> None:
+        if not isinstance(self.custom_header, str):
+            raise ValueError("Der freie PDF-Kopftext muss Text sein.")
         if set(self.fields) - set(PDF_LABELS) or set(self.footer_fields) - set(FOOTER_LABELS):
             raise ValueError("Unbekanntes PDF- oder Fußzeilenfeld.")
 

@@ -3,6 +3,7 @@
 import json
 import logging
 import pickle
+import shutil
 import tempfile
 import threading
 from collections import Counter
@@ -14,6 +15,7 @@ from time import monotonic
 
 from mailbucket.config import RunConfig
 from mailbucket.export.attachments import merge_attachments, save_originals
+from mailbucket.export.bucket_csv import bucket_row, open_bucket_csv
 from mailbucket.export.footer import apply_footer
 from mailbucket.export.manifest import open_manifest
 from mailbucket.export.pdf_renderer import PdfContext, render_email
@@ -94,6 +96,14 @@ class RunLog(logging.Handler):
         else:
             self.stats.warnings += 1
 
+    def relocate(self, path: Path) -> None:
+        """Move the scan log into an output folder once the first hit is known."""
+        self.stream.flush()
+        source = Path(self.stream.name)
+        self.stream.close()
+        shutil.move(source, path)
+        self.stream = path.open("a", encoding="utf-8")
+
     def close(self):
         self.stream.close()
         super().close()
@@ -138,22 +148,21 @@ def execute(
             )
 
     output = None
+    planned_output = None
     if not dry_run:
         if safe_name(config.run_name) != config.run_name or not config.run_name.strip():
             raise ValueError("Laufname enthält unzulässige Zeichen oder ist zu lang.")
-        config.output_dir.mkdir(parents=True, exist_ok=True)
-        output = config.output_dir / config.run_name
-        output.mkdir(exist_ok=False)  # atomic reservation, never overwrite another run
+        planned_output = config.output_dir / config.run_name
+        if planned_output.exists():
+            raise FileExistsError(planned_output)
     stats = Stats(hits={t.bucket: 0 for t in config.terms})
     names = unique_names([t.bucket for t in config.terms])
     with tempfile.TemporaryDirectory(prefix="mailbucket-run-") as directory:
         temp = Path(directory)
-        handler = RunLog(output / "_run.log" if output else temp / "scan.log", stats)
+        handler = RunLog(temp / "scan.log", stats)
         logger = logging.getLogger("mailbucket")
         logger.addHandler(handler)
         try:
-            if output:
-                write_metadata(output / "_run.json", config, asdict(stats), names, "running")
             matcher = ContainsMatcher(config.terms, config.search_fields)
             seen: set[str] = set()
             hits: list[Hit] = []
@@ -208,12 +217,18 @@ def execute(
                 except Exception:
                     log.exception("Quelle konnte nicht vollständig gelesen werden: %s", source)
             notify("Treffer sortieren", stats.analyzed, stats.analyzed)
+            if planned_output and hits:
+                config.output_dir.mkdir(parents=True, exist_ok=True)
+                planned_output.mkdir(exist_ok=False)  # atomic reservation, never overwrite
+                output = planned_output
+                handler.relocate(output / "_run.log")
+                write_metadata(output / "_run.json", config, asdict(stats), names, "running")
             if output:
                 hits.sort(key=lambda hit: hit.key)
-                for name in names.values():
-                    (output / name).mkdir()
                 counts: Counter = Counter()
-                stream, manifest = open_manifest(output / "_manifest.csv")
+                bucket_streams = {}
+                bucket_writers = {}
+                manifest_stream, manifest = open_manifest(output / "_manifest.csv")
                 try:
                     for number, hit in enumerate(hits, 1):
                         notify("PDFs erzeugen", number - 1, len(hits))
@@ -234,7 +249,8 @@ def execute(
                                 stem = f"{names[bucket]}_{counts[bucket]:0{width}d}"
                                 if config.export.timestamp_names and mail.date:
                                     stem += mail.date.strftime("_%Y%m%d_%H%M%S")
-                                target = output / names[bucket] / f"{stem}.pdf"
+                                bucket_dir = output / names[bucket]
+                                target = bucket_dir / f"{stem}.pdf"
                                 context = PdfContext(hit.locations, export_time, target.name)
                                 terms = matched if config.export.pdf.bucket_specific else all_terms
                                 key = (
@@ -257,8 +273,16 @@ def execute(
                                     cached_final = apply_footer(
                                         cached_pdf, mail, terms, config.export.pdf, context
                                     )
+                                bucket_dir.mkdir(exist_ok=True)
                                 target.write_bytes(cached_final)
                                 pdf_hash = sha256(cached_final)
+                                if bucket not in bucket_writers:
+                                    bucket_stream, bucket_writer = open_bucket_csv(
+                                        bucket_dir / f"{names[bucket]}.csv"
+                                    )
+                                    bucket_streams[bucket] = bucket_stream
+                                    bucket_writers[bucket] = bucket_writer
+                                bucket_writers[bucket].writerow(bucket_row(mail))
                                 originals = save_originals(
                                     mail, target.parent / "attachments" / stem, config.export
                                 )
@@ -315,7 +339,9 @@ def execute(
                         finally:
                             hit.path.unlink(missing_ok=True)
                 finally:
-                    stream.close()
+                    manifest_stream.close()
+                    for bucket_stream in bucket_streams.values():
+                        bucket_stream.close()
                 notify("Manifest schreiben", len(hits), len(hits))
                 write_metadata(
                     output / "_run.json",

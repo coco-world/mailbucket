@@ -11,7 +11,12 @@ def test_round_trip_and_no_mail_data(tmp_path):
         ("bcc", "message_id"),
         False,
         ExportOptions(
-            pdf=PdfOptions(fields=("subject", "message_id"), footer_enabled=False, footer_fields=())
+            pdf=PdfOptions(
+                custom_header="Interner Prüfvermerk",
+                fields=("subject", "message_id"),
+                footer_enabled=False,
+                footer_fields=(),
+            )
         ),
     )
     save_preferences(preferences, path)

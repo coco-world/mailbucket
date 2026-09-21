@@ -2,6 +2,7 @@
 
 import csv
 import io
+import re
 from dataclasses import dataclass
 from email.utils import getaddresses
 
@@ -44,11 +45,25 @@ class MatchResult:
     locations: dict[str, list[str]]
 
 
+def contains_term(value: str, needle: str, numeric_pattern: re.Pattern | None) -> bool:
+    return (
+        numeric_pattern.search(value) is not None
+        if numeric_pattern is not None
+        else needle in value
+    )
+
+
 class ContainsMatcher:
     def __init__(self, terms: list[SearchTerm], fields: tuple[str, ...] = DEFAULT_SEARCH_FIELDS):
         if set(fields) - set(SEARCH_FIELDS):
             raise ValueError("Unbekanntes Suchfeld.")
-        self.terms = [(t, t.term.casefold()) for t in terms]
+        self.terms = []
+        for term in terms:
+            needle = term.term.casefold()
+            numeric_pattern = (
+                re.compile(rf"(?<!\d){re.escape(needle)}(?!\d)") if needle.isdecimal() else None
+            )
+            self.terms.append((term, needle, numeric_pattern))
         self.fields = fields
 
     def match(self, mail: NormalizedEmail) -> dict[str, list[str]]:
@@ -84,10 +99,16 @@ class ContainsMatcher:
         )
         matches: dict[str, list[str]] = {}
         locations: dict[str, list[str]] = {}
-        for term, needle in self.terms:
-            found = [f for f, value in haystacks.items() if needle in value]
+        for term, needle, numeric_pattern in self.terms:
+            found = [
+                field
+                for field, value in haystacks.items()
+                if contains_term(value, needle, numeric_pattern)
+            ]
             found.extend(
-                f"attachment_content:{name}" for name, text in attachment_values if needle in text
+                f"attachment_content:{name}"
+                for name, text in attachment_values
+                if contains_term(text, needle, numeric_pattern)
             )
             if found:
                 matches.setdefault(term.bucket, []).append(term.term)

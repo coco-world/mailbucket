@@ -52,6 +52,23 @@ def test_html_alternative_is_searchable(make_mail):
 
 
 @pytest.mark.parametrize(
+    "subject,expected",
+    [
+        ("Vorgang 91235", False),
+        ("Vorgang 9123", False),
+        ("Vorgang 1235", False),
+        ("Vorgang A123B", True),
+        ("Vorgang 123.", True),
+        ("Vorgang 91235 und 123", True),
+    ],
+)
+def test_numeric_terms_require_digit_boundaries(make_mail, subject, expected):
+    mail = normalize(make_mail(subject=subject).as_bytes())
+    result = ContainsMatcher(parse_terms("123"), ("subject",)).match(mail)
+    assert bool(result) is expected
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "bad,header\nx,y",

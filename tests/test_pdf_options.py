@@ -46,6 +46,21 @@ def test_default_memo_and_opt_in_metadata(make_mail):
     assert "query-marker" in text and "one@example.com" in text and "Nachrichtentext" in text
 
 
+def test_custom_header_is_rendered_before_mail_body(make_mail):
+    mail = normalize(make_mail(body="Mailtext").as_bytes())
+    data = render_email(
+        mail,
+        [],
+        PdfOptions(
+            custom_header="Kanzlei A & B\nAktennotiz",
+            fields=(),
+            footer_enabled=False,
+        ),
+    )
+    output = extract(data)
+    assert output.index("Kanzlei A & B") < output.index("Aktennotiz") < output.index("Mailtext")
+
+
 def test_all_fields_off_keep_body_only(make_mail):
     mail = normalize(make_mail(subject="PRIVATE-SUBJECT", body="Visible-body").as_bytes())
     text = extract(

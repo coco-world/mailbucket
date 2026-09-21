@@ -50,6 +50,8 @@ def load_preferences(path: Path | None = None) -> Preferences:
         for key, value in export_data.items():
             if key != "pdf_mode" and type(value) is not bool:
                 raise ValueError("Ungültiger Schalter")
+        if not isinstance(pdf_data.get("custom_header", ""), str):
+            raise ValueError("Ungültiger PDF-Kopftext")
         if type(data["deduplicate"]) is not bool or type(pdf_data["footer_enabled"]) is not bool:
             raise ValueError("Ungültiger Schalter")
         pdf_data["fields"] = tuple(pdf_data["fields"])
