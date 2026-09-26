@@ -1,6 +1,7 @@
 import csv
 import json
 import mailbox
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -29,6 +30,7 @@ def config(tmp_path, make_mail):
 
 def test_dry_export_sort_manifest_and_no_overwrite(tmp_path, make_mail, monkeypatch):
     cfg = config(tmp_path, make_mail)
+    cfg.export_workers = 1  # keep the monkeypatched call counter in this process
     dry = execute(cfg, dry_run=True)
     assert dry.stats.analyzed == 4 and dry.stats.duplicates == 1
     assert dry.stats.hits == {"A": 3, "B": 3}
@@ -168,3 +170,59 @@ def test_only_hit_buckets_get_excel_csv(tmp_path, make_mail):
     assert "Alice Müller" in rows[0]["von"]
     assert "bob@example.com" in rows[0]["an"]
     assert "Erste Zeile; mit Semikolon\nZweite Zeile mit Umlaut ä" in rows[0]["Text"]
+
+
+def test_progress_reports_bytes_timing_and_worker_counts(tmp_path, make_mail):
+    source = tmp_path / "source.eml"
+    source.write_bytes(make_mail(subject="Alpha").as_bytes())
+    cfg = RunConfig(
+        [source],
+        parse_csv("term,bucket\nAlpha,A"),
+        tmp_path / "out",
+        "run",
+        search_workers=2,
+        export_workers=1,
+    )
+    updates = []
+
+    execute(cfg, dry_run=True, on_progress=updates.append)
+
+    scan = [update for update in updates if update.stage == "scan"]
+    assert scan[-1].processed_bytes == source.stat().st_size
+    assert scan[-1].total_bytes == source.stat().st_size
+    assert scan[-1].elapsed_seconds >= 0
+    assert scan[-1].search_workers == 2 and scan[-1].export_workers == 1
+    assert updates[-1].stage == "complete"
+
+
+def test_worker_limits_are_validated(tmp_path, make_mail):
+    cfg = config(tmp_path, make_mail)
+    cfg.search_workers = 0
+    with pytest.raises(ValueError, match="Such-Worker"):
+        cfg.validate()
+    cfg.search_workers = 1
+    cfg.export_workers = 99
+    with pytest.raises(ValueError, match="Ablage-Worker"):
+        cfg.validate()
+
+
+def test_parallel_search_runs_from_ui_background_thread(tmp_path, make_mail):
+    source = tmp_path / "parallel.mbox"
+    box = mailbox.mbox(source)
+    box.add(make_mail(subject="Alpha", message_id="<one>"))
+    box.add(make_mail(subject="Alpha", message_id="<two>"))
+    box.close()
+    cfg = RunConfig(
+        [source],
+        parse_csv("term,bucket\nAlpha,A"),
+        tmp_path / "out",
+        "run",
+        search_workers=2,
+        export_workers=1,
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(execute, cfg, dry_run=True).result(timeout=20)
+
+    assert result.stats.analyzed == 2
+    assert result.stats.hits == {"A": 2}

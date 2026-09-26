@@ -45,6 +45,42 @@ class MatchResult:
     locations: dict[str, list[str]]
 
 
+def searchable_values(
+    mail: NormalizedEmail,
+    attachment_texts: list[tuple[str, str]] | None = None,
+    *,
+    extract_attachment_text: bool = True,
+) -> tuple[dict[str, str], list[tuple[str, str]]]:
+    """Build the canonical searchable representation used by scans and indexes."""
+    senders = getaddresses([mail.sender])
+    values = {
+        "subject": mail.subject,
+        "from": mail.sender,
+        "sender_name": "\n".join(name for name, _ in senders),
+        "sender_email": "\n".join(address for _, address in senders),
+        "to": "\n".join(mail.to),
+        "cc": "\n".join(mail.cc),
+        "bcc": "\n".join(mail.bcc),
+        "body": mail.body_text,
+        "attachment_names": "\n".join(a.filename for a in mail.attachments),
+        "labels": "\n".join(mail.labels),
+        "message_id": mail.message_id or "",
+        "source_folder": mail.source_folder or "",
+        "reply_to": mail.headers.get("Reply-To", ""),
+        "in_reply_to": mail.headers.get("In-Reply-To", ""),
+        "references": mail.headers.get("References", ""),
+    }
+    if mail.body_html:
+        values["body"] += "\n" + html_to_text(mail.body_html)
+    if attachment_texts is None:
+        attachment_texts = (
+            [(a.filename, attachment_text(a)) for a in mail.attachments]
+            if extract_attachment_text
+            else []
+        )
+    return values, attachment_texts
+
+
 def contains_term(value: str, needle: str, numeric_pattern: re.Pattern | None) -> bool:
     return (
         numeric_pattern.search(value) is not None
@@ -71,29 +107,24 @@ class ContainsMatcher:
 
     def match_details(self, mail: NormalizedEmail) -> MatchResult:
         """Record actual fields for each term while extracting attachments only once per mail."""
-        senders = getaddresses([mail.sender])
-        values = {
-            "subject": mail.subject,
-            "from": mail.sender,
-            "sender_name": "\n".join(name for name, _ in senders),
-            "sender_email": "\n".join(address for _, address in senders),
-            "to": "\n".join(mail.to),
-            "cc": "\n".join(mail.cc),
-            "bcc": "\n".join(mail.bcc),
-            "body": mail.body_text,
-            "attachment_names": "\n".join(a.filename for a in mail.attachments),
-            "labels": "\n".join(mail.labels),
-            "message_id": mail.message_id or "",
-            "source_folder": mail.source_folder or "",
-            "reply_to": mail.headers.get("Reply-To", ""),
-            "in_reply_to": mail.headers.get("In-Reply-To", ""),
-            "references": mail.headers.get("References", ""),
-        }
-        if "body" in self.fields and mail.body_html:
-            values["body"] += "\n" + html_to_text(mail.body_html)
+        values, extracted_attachments = searchable_values(
+            mail, extract_attachment_text="attachment_content" in self.fields
+        )
+        return self._match_values(values, extracted_attachments)
+
+    def match_details_with_attachment_text(
+        self, mail: NormalizedEmail, attachment_texts: list[tuple[str, str]]
+    ) -> MatchResult:
+        """Exact match using attachment text already persisted in the local index."""
+        values, extracted_attachments = searchable_values(mail, attachment_texts)
+        return self._match_values(values, extracted_attachments)
+
+    def _match_values(
+        self, values: dict[str, str], extracted_attachments: list[tuple[str, str]]
+    ) -> MatchResult:
         haystacks = {f: values[f].casefold() for f in self.fields if f != "attachment_content"}
         attachment_values = (
-            [(a.filename, attachment_text(a).casefold()) for a in mail.attachments]
+            [(name, text.casefold()) for name, text in extracted_attachments]
             if "attachment_content" in self.fields
             else []
         )

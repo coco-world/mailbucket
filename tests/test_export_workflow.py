@@ -28,7 +28,15 @@ def test_failed_message_does_not_skip_remaining_mailbox(tmp_path, make_mail, mon
         return original(self, mail)
 
     monkeypatch.setattr(ContainsMatcher, "match_details", match)
-    result = execute(RunConfig([source], parse_terms("Alpha"), tmp_path / "out", "run"))
+    result = execute(
+        RunConfig(
+            [source],
+            parse_terms("Alpha"),
+            tmp_path / "out",
+            "run",
+            search_workers=1,
+        )
+    )
     assert result.stats.analyzed == 2
     assert result.stats.errors == 1
     assert result.stats.exported == 1
@@ -121,6 +129,7 @@ def test_footer_only_variants_reuse_memo(tmp_path, make_mail, monkeypatch):
         tmp_path / "out",
         "run",
         export=ExportOptions(pdf=PdfOptions(footer_fields=("filename",))),
+        export_workers=1,
     )
     result = execute(config)
     assert result.stats.exported == 2 and len(calls) == 1

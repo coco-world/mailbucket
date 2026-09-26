@@ -8,7 +8,16 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from mailbucket.config import DEFAULT_SEARCH_FIELDS, SEARCH_FIELDS, ExportOptions, PdfOptions
+from mailbucket.config import (
+    DEFAULT_SEARCH_FIELDS,
+    MAX_EXPORT_WORKERS,
+    MAX_SEARCH_WORKERS,
+    SEARCH_FIELDS,
+    ExportOptions,
+    PdfOptions,
+    default_export_workers,
+    default_search_workers,
+)
 
 
 @dataclass
@@ -16,19 +25,32 @@ class Preferences:
     search_fields: tuple[str, ...] = DEFAULT_SEARCH_FIELDS
     deduplicate: bool = True
     export: ExportOptions = field(default_factory=ExportOptions)
+    search_workers: int = field(default_factory=default_search_workers)
+    export_workers: int = field(default_factory=default_export_workers)
+    auto_index: bool = True
 
 
-def settings_path() -> Path:
+def application_data_dir() -> Path:
     override = os.environ.get("MAILBUCKET_SETTINGS_PATH")
     if override:
-        return Path(override).expanduser()
+        return Path(override).expanduser().parent
     if sys.platform == "win32":
         root = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
     elif sys.platform == "darwin":
         root = Path.home() / "Library" / "Application Support"
     else:
         root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return root / "MailBucket" / "settings.json"
+    return root / "MailBucket"
+
+
+def settings_path() -> Path:
+    override = os.environ.get("MAILBUCKET_SETTINGS_PATH")
+    return Path(override).expanduser() if override else application_data_dir() / "settings.json"
+
+
+def indexes_path() -> Path:
+    override = os.environ.get("MAILBUCKET_INDEX_PATH")
+    return Path(override).expanduser() if override else application_data_dir() / "indexes"
 
 
 def load_preferences(path: Path | None = None) -> Preferences:
@@ -54,11 +76,30 @@ def load_preferences(path: Path | None = None) -> Preferences:
             raise ValueError("Ungültiger PDF-Kopftext")
         if type(data["deduplicate"]) is not bool or type(pdf_data["footer_enabled"]) is not bool:
             raise ValueError("Ungültiger Schalter")
+        auto_index = data.get("auto_index", True)
+        if type(auto_index) is not bool:
+            raise ValueError("Ungültiger Index-Schalter")
+        search_workers = data.get("search_workers", default_search_workers())
+        export_workers = data.get("export_workers", default_export_workers())
+        if (
+            type(search_workers) is not int
+            or not 1 <= search_workers <= MAX_SEARCH_WORKERS
+            or type(export_workers) is not int
+            or not 1 <= export_workers <= MAX_EXPORT_WORKERS
+        ):
+            raise ValueError("Ungültige Parallelität")
         pdf_data["fields"] = tuple(pdf_data["fields"])
         pdf_data["footer_fields"] = tuple(pdf_data["footer_fields"])
         export = ExportOptions(**export_data, pdf=PdfOptions(**pdf_data))
         export.validate()
-        return Preferences(tuple(search), data["deduplicate"], export)
+        return Preferences(
+            tuple(search),
+            data["deduplicate"],
+            export,
+            search_workers,
+            export_workers,
+            auto_index,
+        )
     except (OSError, ValueError, TypeError, KeyError):
         logging.getLogger(__name__).warning("Einstellungen unlesbar; Standards verwendet: %s", path)
         return Preferences()

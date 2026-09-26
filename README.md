@@ -44,7 +44,10 @@ mailbucket
 - Bucket-Ordner nur bei Treffern; je Ordner eine gleichnamige, Excel-taugliche CSV.
 - Freier, gespeicherter Kopftext auf jeder exportierten Mail-PDF.
 - Manifest, SHA-256-Hashes, Laufparameter und Fehlerprotokoll.
-- Fortschrittsanzeige; längere Vorgänge laufen außerhalb der UI-Ereignisschleife.
+- Fortschrittsanzeige mit Datenmenge, Laufzeit, Durchsatz und geschätzter Restzeit.
+- Persistente lokale SQLite-/FTS5-Indizes pro Quelle; aktuelle Indizes werden bei
+  späteren Suchen wiederverwendet, ohne das gesamte Archiv erneut zu parsen.
+- Einstellbare Parallelität für Suche (1–8 Worker) und PDF-Ablage (1–4 Worker).
 - Lokales Logo, gespeicherte Such-/Exportoptionen und Auswahlhilfen für PDF-Einstellungen.
 
 **Screenshot-Platzhalter:** Hier kann ein Screenshot der lokalen Oberfläche mit
@@ -201,15 +204,86 @@ mailbucket --host 127.0.0.1 --port 8081 --no-browser
 7. Ergebnis, Protokoll und **Ausgabeordner öffnen** nutzen.
 
 Während eines Laufs sind Startbuttons und Formular gesperrt. Die Fortschrittsanzeige
-zeigt die Phase, aktuelle Mailbox, Suchbegriffe, geprüfte Nachrichten, gefundene Mails
-und exportierte PDFs (einschließlich Kopien in mehreren Buckets). Alle ausgewählten
-Begriffe werden pro Nachricht gemeinsam geprüft; beim Export stehen die Begriffe des
-gerade bearbeiteten Buckets in der Anzeige. Eine Gesamtzahl wird beim Streaming-Import
-nicht vorab ermittelt, daher ist der Balken dort unbestimmt. Bei PDF-Erzeugung ist die
-Trefferzahl bekannt; die Prozentanzeige bezieht sich auf die jeweils angezeigte Phase.
+zeigt die Phase, aktuelle Mailbox, Suchbegriffe, geprüfte Nachrichten, gefundene Mails,
+exportierte PDFs, verarbeitete Datenmenge, Laufzeit, Durchsatz und geschätzte Restzeit.
+Alle ausgewählten Begriffe werden pro Nachricht gemeinsam geprüft; beim Export stehen
+die Begriffe der gerade abgeschlossenen Nachricht in der Anzeige. Für MBOX, EML,
+Maildir und ZIP wird der Quelldatenumfang ohne vollständigen Vorab-Scan ermittelt.
+Bei komprimierten TAR/TGZ-Streams bleibt der Balken beim Einlesen unbestimmt, zeigt
+aber weiterhin Nachrichtenzahl, gelesene Datenmenge und Laufzeit. Die Restzeit ist eine
+laufend aktualisierte Schätzung und erscheint erst, wenn genügend Messdaten vorliegen.
+Bei der PDF-Erzeugung bezieht sich die Prozentanzeige auf alle Bucket-PDFs.
 Scrollen, Fortschritt und Ergebnisansicht bleiben bedienbar.
 Ein bestehender Laufordner erzeugt einen Fehler und wird niemals wiederverwendet.
 Nach erfolgreichem Export schlägt das UI einen freien Namen mit numerischem Suffix vor.
+
+## Leistung und Parallelität
+
+Unter **08 Leistung** lassen sich parallele Such- und Ablage-Worker einstellen.
+Standardmäßig verwendet MailBucket abhängig vom Rechner bis zu vier Such- und zwei
+PDF-Worker. Jeder Worker läuft als eigener Prozess, sodass CPU-intensive MIME-, Such-
+und PDF-Arbeit tatsächlich mehrere Prozessorkerne nutzen kann. Suche und Export bleiben
+getrennte Phasen, damit die chronologische
+Sortierung und stabile Bucket-Nummerierung erhalten bleiben. Innerhalb einer Phase
+werden Nachrichten beziehungsweise Treffer parallel verarbeitet; Manifest und Bucket-CSV
+werden anschließend weiterhin in deterministischer Reihenfolge geschrieben.
+
+Mehr Worker sind nicht automatisch schneller. Große Anhänge, PDF-Textsuche und
+PDF-Erzeugung benötigen zusätzlichen Arbeitsspeicher, während HDDs durch parallele
+Zugriffe langsamer werden können. Für SSD-Systeme sind 4/2 ein sinnvoller Startwert;
+bei knappem RAM oder HDD eher 2/1. Die interne Warteschlange ist begrenzt, sodass auch
+bei großen Archiven nur eine kleine Anzahl Nachrichten gleichzeitig vorgeladen wird.
+
+## Persistenter lokaler Suchindex
+
+MailBucket legt für jede ausgewählte Quelle einen eigenen SQLite-Index mit FTS5 an.
+Beim ersten Lauf wird die Quelle einmal vollständig eingelesen. Spätere Dry Runs und
+Exporte verwenden den vorhandenen Index, solange die Quelle unverändert ist. Dadurch
+entfallen das wiederholte Parsen der kompletten MBOX und die wiederholte Textextraktion
+aus unterstützten Anhängen. Beim Export werden anschließend nur die gefundenen
+Originalnachrichten aus MBOX, EML, Maildir oder Takeout geladen.
+
+Jeder Index ist fest an eine kanonische absolute Quelle und ihren Typ gebunden. Eine
+SHA-256-basierte `source_id` verhindert, dass zwei gleichnamige Dateien in verschiedenen
+Ordnern denselben Index verwenden. Zusätzlich speichert MailBucket einen Fingerprint:
+bei Dateien unter anderem Größe, Nanosekunden-Änderungszeit sowie Hashes vom Anfang und
+Ende; bei Verzeichnissen eine sortierte Liste aus relativem Pfad, Größe und
+Änderungszeit. Ändert sich die Quelle oder die Indexstruktur, wird der Zustand
+**veraltet** und der Index vollständig neu aufgebaut. Ein veralteter Index wird nie
+stillschweigend für eine Suche verwendet.
+
+Der Index enthält normalisierte Mailfelder, Suchtexte, Hashes, Quellpositionen und den
+extrahierten Text unterstützter Anhänge. Die Binärdaten der Anhänge werden nicht
+dauerhaft in SQLite dupliziert. FTS5 dient als schneller Kandidatenfilter; jeder
+Kandidat wird mit derselben exakten Matching-Logik wie beim klassischen Scan geprüft.
+Kurze, nicht zuverlässig per FTS abbildbare oder nicht-ASCII-Suchen werden korrekt auf
+den gespeicherten normalisierten Texten geprüft. Reine Zahlenbegriffe behalten ihre
+Zifferngrenzen.
+
+Der Aufbau erfolgt in einer temporären `.building.sqlite3`-Datei. Erst nach erfolgreicher
+Integritätsprüfung und erneuter Fingerprint-Prüfung ersetzt sie atomar den bisherigen
+Index. Ein Abbruch oder Fehler lässt einen zuvor gültigen Index bestehen; die Anwendung
+fällt bei Bedarf auf den klassischen Scan zurück. Fortschritt, verarbeitete Datenmenge,
+Durchsatz und Restzeitschätzung werden auch während des Indexaufbaus angezeigt.
+
+In **01 Quellen** zeigt jede Quelle den Zustand *nicht indexiert*, *aktuell*, *veraltet*,
+*wird aufgebaut* oder *Fehler*. Dort lassen sich Indizes erstellen, aktualisieren,
+neu aufbauen und löschen. **Index automatisch erstellen bzw. aktualisieren** ist
+standardmäßig aktiv und wird mit den übrigen Einstellungen gespeichert. Unter
+**Indexverwaltung** sind auch Indizes momentan nicht angeschlossener Quellen sichtbar.
+Das Löschen eines Index entfernt nur die lokale SQLite-Datei, niemals das Mailarchiv.
+
+Speicherorte der Indizes:
+
+- Windows: `%APPDATA%\MailBucket\indexes\<source_id>.sqlite3`
+- macOS: `~/Library/Application Support/MailBucket/indexes/<source_id>.sqlite3`
+- Linux: `$XDG_CONFIG_HOME/MailBucket/indexes/<source_id>.sqlite3` bzw.
+  `~/.config/MailBucket/indexes/<source_id>.sqlite3`
+
+Für portable Installationen und Tests kann `MAILBUCKET_INDEX_PATH` auf ein anderes
+Indexverzeichnis gesetzt werden. Die Indizes enthalten lokale Mailinhalte und
+Quellpfade und sollten deshalb wie die Archive selbst geschützt und nicht ungeprüft
+weitergegeben werden. MailBucket überträgt diese Daten nicht ins Netzwerk.
 
 ## Suchfelder und Fundstellen
 
@@ -388,6 +462,7 @@ src/mailbucket/
 ├── settings.py, branding.py  # lokale Optionen und Logo-Erkennung
 ├── pipeline.py              # Streaming, Treffer-Spool, Sortierung, Export
 ├── importers/               # Normalisierung, EML, MBOX, Maildir, Takeout, Protocol
+├── index/                   # Fingerprints, SQLite/FTS5, atomarer Aufbau, Treffer-Laden
 ├── search/                  # ContainsMatcher, Anhangtext, TXT/CSV, Dedup
 ├── export/                  # Memo-PDFs, Fußzeilen, Anhänge, Manifest, Laufmetadaten
 └── utils/                   # Daten, Dateinamen, Text, Hashes
@@ -431,7 +506,9 @@ Tests prüfen MIME/HTML/Unicode, Adressen, Labels, Suchfelder, CSV-Validierung,
 Duplikate, Datumsreihenfolge, Pfadbereinigung, Archiv-Traversal und Links,
 PDF-Inhalte, einzeln auswählbare Metadaten/Fußzeilen, Seitenzählung mit Anhängen,
 defekte Anhänge, gespeicherte Optionen sowie MBOX-/Takeout-zu-Bucket-Läufe
-mit Hashprüfung, Fundstellen und Überschreibschutz.
+mit Hashprüfung, Fundstellen und Überschreibschutz. Für die lokalen Indizes werden
+zusätzlich Quellenwechsel, Fingerprints, Wiederverwendung, FTS5, exakte Trefferparität,
+numerische Grenzen, Takeout-Treffer, abgebrochene Builds und defekte SQLite-Dateien geprüft.
 
 ## Bekannte Einschränkungen
 
@@ -441,15 +518,17 @@ mit Hashprüfung, Fundstellen und Überschreibschutz.
 - PDF verwendet einen Outlook-ähnlichen Memo-Kopf und lesbaren Text; HTML-Layout wird nicht nachgebildet.
   ReportLabs eingebettete Vera-Schrift unterstützt deutsche Umlaute und zahlreiche
   lateinische Zeichen; CJK, Emoji und komplexe Schreibrichtungen sind nicht vollständig abgedeckt.
-- Es wird höchstens eine Mail einschließlich ihrer Anhänge vollständig im RAM gehalten;
-  während PDF-Erzeugung zusätzlich ihre PDF-Daten. Sehr große Einzelmails können viel RAM benötigen.
+- Pro Such-Worker werden höchstens zwei Aufgaben vorgeladen; während der PDF-Erzeugung
+  gilt dieselbe begrenzte Warteschlange pro Ablage-Worker. Sehr große Einzelmails und
+  Anhänge können daher besonders bei hoher Parallelität viel RAM benötigen.
   Treffer-Binaries werden temporär auf Platte gespeichert; Metadaten und Dedup-Schlüssel
   wachsen mit der Nachrichten-/Trefferzahl im RAM. MBOX benötigt intern einen Offsetindex.
 - Archive werden gestreamt bzw. eine Mailbox nach der anderen entpackt. Es gibt keine
   konfigurierbare Entpack-Quota; sehr große oder künstlich aufgeblähte Archive können
   den freien Speicher beanspruchen.
-- Kein Abbrechen/Wiederaufnehmen oder persistenter Suchindex. Dry Run und Export
-  lesen separat. Lokaler Dateiauswahldialog listet große Verzeichnisse vollständig.
+- Kein Abbrechen/Wiederaufnehmen eines begonnenen Laufs. Der lokale Index beschleunigt
+  die Suche; Dry Run und Export prüfen die Quelle jeweils erneut auf Änderungen.
+  Lokaler Dateiauswahldialog listet große Verzeichnisse vollständig.
 - PDF-Seitenübernahme erhält visuelle Inhalte, aber keine Garantie für die Gültigkeit
   vorhandener digitaler Signaturen. Original-PDF-Dateien bleiben bei Speicherung bytegetreu.
 - Manifest-Metadaten sind originalgetreu; beim Öffnen fremder Inhalte in Tabellenprogrammen
@@ -458,7 +537,7 @@ mit Hashprüfung, Fundstellen und Überschreibschutz.
 ## Geplante Erweiterungen
 
 Optionale Outlook-/EMLX-Adapter, weitere Suchmodi, erweiterte Schriftabdeckung,
-Abbrechen/Wiederaufnehmen, lokale Indizes und optionale Office-Konvertierung.
+Abbrechen/Wiederaufnehmen, inkrementelle Indexaktualisierung und optionale Office-Konvertierung.
 
 ## Lizenz
 

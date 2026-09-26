@@ -1,5 +1,6 @@
 """Run configuration, shared by UI and Python API."""
 
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -74,6 +75,18 @@ FOOTER_LABELS = {
     "filename": "Dateiname der Exportdatei",
 }
 DEFAULT_FOOTER_FIELDS = ("application", "page_number")
+MAX_SEARCH_WORKERS = 8
+MAX_EXPORT_WORKERS = 4
+
+
+def default_search_workers() -> int:
+    """Leave one logical CPU responsive and avoid excessive attachment memory use."""
+    return min(MAX_SEARCH_WORKERS, max(1, (os.cpu_count() or 2) - 1), 4)
+
+
+def default_export_workers() -> int:
+    """PDF work is memory and disk intensive, so a smaller pool is preferable."""
+    return min(MAX_EXPORT_WORKERS, max(1, (os.cpu_count() or 2) - 1), 2)
 
 
 @dataclass
@@ -126,6 +139,10 @@ class RunConfig:
     search_fields: tuple[str, ...] = DEFAULT_SEARCH_FIELDS
     deduplicate: bool = True
     export: ExportOptions = field(default_factory=ExportOptions)
+    search_workers: int = field(default_factory=default_search_workers)
+    export_workers: int = field(default_factory=default_export_workers)
+    use_index: bool = False
+    auto_index: bool = True
 
     def validate(self) -> None:
         if not self.sources:
@@ -137,4 +154,20 @@ class RunConfig:
         for source in self.sources:
             if not source.exists():
                 raise ValueError(f"Quelle existiert nicht: {source}")
+        if (
+            type(self.search_workers) is not int
+            or not 1 <= self.search_workers <= MAX_SEARCH_WORKERS
+        ):
+            raise ValueError(
+                f"Parallele Such-Worker müssen zwischen 1 und {MAX_SEARCH_WORKERS} liegen."
+            )
+        if (
+            type(self.export_workers) is not int
+            or not 1 <= self.export_workers <= MAX_EXPORT_WORKERS
+        ):
+            raise ValueError(
+                f"Parallele Ablage-Worker müssen zwischen 1 und {MAX_EXPORT_WORKERS} liegen."
+            )
+        if type(self.use_index) is not bool or type(self.auto_index) is not bool:
+            raise ValueError("Indexoptionen müssen boolesche Werte sein.")
         self.export.validate()
