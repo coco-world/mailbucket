@@ -10,12 +10,17 @@ from mailbucket.config import RunConfig
 def write_metadata(
     path: Path, config: RunConfig, stats: dict, buckets: dict, status: str = "complete"
 ) -> None:
+    options = asdict(config)
+    selected = options.pop("selected_index_records", None)
     data = {
         "application": "MailBucket",
         "version": __version__,
         "created_at": datetime.now().astimezone().isoformat(),
         "status": status,
-        **asdict(config),
+        **options,
+        "selected_record_count": sum(len(records) for records in selected.values())
+        if selected
+        else None,
         "statistics": stats,
         "bucket_directories": buckets,
         "naive_dates": "UTC",

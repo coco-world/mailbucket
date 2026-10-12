@@ -481,6 +481,7 @@ def execute(
                 seen: set[str] = set()
                 hits: list[Hit] = []
                 index_manager = IndexManager() if config.use_index else None
+                selected_sources_seen: set[str] = set()
 
                 def record_hit(
                     mail: NormalizedEmail,
@@ -585,6 +586,16 @@ def execute(
                         return False
                     current_mailbox = str(source)
                     info = index_manager.status(source)
+                    selected_records = config.selected_index_records
+                    if selected_records is not None:
+                        if (
+                            info.state != IndexState.CURRENT
+                            or info.source_id not in selected_records
+                        ):
+                            raise RuntimeError(
+                                f"Ausgewählte Treffer für {source.name} benötigen einen aktuellen Index."
+                            )
+                        selected_sources_seen.add(info.source_id)
                     if info.state != IndexState.CURRENT and config.auto_index:
                         notify(
                             f"Index vorbereiten: {source.name}",
@@ -616,10 +627,13 @@ def execute(
                             return False
                     if info.state != IndexState.CURRENT:
                         return False
+                    wanted = (
+                        selected_records[info.source_id] if selected_records is not None else None
+                    )
                     notify(
                         f"Lokalen Index durchsuchen: {source.name}",
                         0,
-                        info.mail_count,
+                        len(wanted) if wanted is not None else info.mail_count,
                         stage="index_search_prepare",
                     )
 
@@ -633,14 +647,30 @@ def execute(
                         )
 
                     try:
-                        indexed_matches = index_manager.search(
-                            source,
-                            config.terms,
-                            config.search_fields,
-                            search_progress,
-                        )
-                        records = index_manager.dedup_records(source)
+                        if wanted is not None:
+                            indexed_matches = index_manager.search(
+                                source,
+                                config.terms,
+                                config.search_fields,
+                                search_progress,
+                                record_ids=set(wanted),
+                            )
+                            records = sorted(
+                                (match.record_id, match.dedup) for match in indexed_matches
+                            )
+                        else:
+                            indexed_matches = index_manager.search(
+                                source,
+                                config.terms,
+                                config.search_fields,
+                                search_progress,
+                            )
+                            records = index_manager.dedup_records(source)
                     except Exception:
+                        if selected_records is not None:
+                            raise RuntimeError(
+                                f"Ausgewählte Treffer für {source.name} konnten nicht geprüft werden."
+                            ) from None
                         log.warning(
                             "Indexsuche fehlgeschlagen; klassische Suche wird verwendet: %s",
                             source,
@@ -648,6 +678,15 @@ def execute(
                         )
                         return False
                     by_id = {match.record_id: match for match in indexed_matches}
+                    if wanted is not None:
+                        if any(
+                            record_id not in by_id or by_id[record_id].mail.raw_sha256 != digest
+                            for record_id, digest in wanted.items()
+                        ):
+                            raise RuntimeError(
+                                "Die ausgewählten Treffer passen nicht mehr zur Suche oder Quelle. "
+                                "Bitte die Schnellsuche erneut ausführen."
+                            )
                     accepted: list[IndexedMatch] = []
                     seen_before = seen.copy()
                     analyzed_before = stats.analyzed
@@ -676,6 +715,10 @@ def execute(
                         try:
                             originals = index_manager.load_original_matches(source, accepted)
                         except Exception:
+                            if selected_records is not None:
+                                raise RuntimeError(
+                                    "Ausgewählte Originalnachrichten konnten nicht geladen werden."
+                                ) from None
                             log.exception(
                                 "Indizierte Treffer konnten nicht aus der Quelle geladen werden: %s",
                                 source,
@@ -700,7 +743,18 @@ def execute(
 
                 for source in config.sources:
                     if not scan_indexed(source):
+                        if config.selected_index_records is not None:
+                            raise RuntimeError(
+                                f"Ausgewählte Treffer für {source.name} benötigen einen aktuellen Index."
+                            )
                         scan_classically(source)
+
+                if config.selected_index_records is not None and selected_sources_seen != set(
+                    config.selected_index_records
+                ):
+                    raise RuntimeError(
+                        "Die ausgewählten Quellen stimmen nicht mehr mit der Suche überein."
+                    )
 
                 if scan_total_bytes is not None:
                     processed_bytes = scan_total_bytes

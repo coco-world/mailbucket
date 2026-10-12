@@ -4,7 +4,7 @@ import json
 import os
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -451,15 +451,29 @@ class IndexManager:
         terms: list[SearchTerm],
         fields: tuple[str, ...],
         on_progress: Callable[[int, int], None] | None = None,
+        record_ids: set[int] | None = None,
     ) -> list[IndexedMatch]:
+        return list(self.iter_search(source, terms, fields, on_progress, record_ids))
+
+    def iter_search(
+        self,
+        source: Path,
+        terms: list[SearchTerm],
+        fields: tuple[str, ...],
+        on_progress: Callable[[int, int], None] | None = None,
+        record_ids: set[int] | None = None,
+    ) -> Iterator[IndexedMatch]:
         info = self.status(source)
         if info.state != IndexState.CURRENT:
             raise RuntimeError(f"Index ist nicht aktuell: {info.state.value}")
         matcher = ContainsMatcher(terms, fields)
-        matches: list[IndexedMatch] = []
         with self._connect(info.index_path, readonly=True) as connection:
             metadata = read_metadata(connection)
-            ids = self._candidate_ids(connection, terms, fields, metadata["fts_tokenizer"])
+            ids = (
+                sorted(record_ids)
+                if record_ids is not None
+                else self._candidate_ids(connection, terms, fields, metadata["fts_tokenizer"])
+            )
             if on_progress and not ids:
                 on_progress(0, 0)
             for offset in range(0, len(ids), 500):
@@ -482,18 +496,15 @@ class IndexManager:
                     extracted = [(item["filename"], item["text"]) for item in attachments]
                     details = matcher.match_details_with_attachment_text(mail, extracted)
                     if details.buckets:
-                        matches.append(
-                            IndexedMatch(
-                                row["id"],
-                                mail,
-                                row["dedup_key"],
-                                details.buckets,
-                                details.locations,
-                            )
+                        yield IndexedMatch(
+                            row["id"],
+                            mail,
+                            row["dedup_key"],
+                            details.buckets,
+                            details.locations,
                         )
                 if on_progress:
                     on_progress(min(offset + len(batch), len(ids)), len(ids))
-        return matches
 
     def load_original_matches(
         self, source: Path, matches: list[IndexedMatch]
@@ -501,6 +512,17 @@ class IndexManager:
         if self.status(source).state != IndexState.CURRENT:
             raise RuntimeError("Quelle oder Index wurde seit der Suche verändert.")
         return load_originals(source, [match.locator for match in matches])
+
+    def get_mail(self, source: Path, record_id: int) -> NormalizedEmail:
+        """Read one normalized message for the local preview without its binary attachments."""
+        info = self.status(source)
+        if info.state != IndexState.CURRENT:
+            raise RuntimeError("Quelle oder Index wurde seit der Suche verändert.")
+        with self._connect(info.index_path, readonly=True) as connection:
+            row = connection.execute("SELECT * FROM mails WHERE id = ?", (record_id,)).fetchone()
+            if row is None:
+                raise ValueError("Nachricht ist nicht mehr im Index vorhanden.")
+            return self._mail_from_row(row, [])
 
     def dedup_records(self, source: Path) -> list[tuple[int, str]]:
         info = self.status(source)

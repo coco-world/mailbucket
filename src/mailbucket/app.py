@@ -20,15 +20,19 @@ from mailbucket.config import (
     MAX_EXPORT_WORKERS,
     MAX_SEARCH_WORKERS,
     PDF_GROUPS,
+    SEARCH_FIELDS,
     SEARCH_GROUPS,
+    SEARCH_LABELS,
     ExportOptions,
     PdfOptions,
     RunConfig,
     default_run_name,
 )
 from mailbucket.index import IndexInfo, IndexManager, IndexProgress, IndexState
+from mailbucket.models import SearchTerm
 from mailbucket.pipeline import ProgressUpdate, Result, execute
 from mailbucket.search.matcher import parse_csv, parse_terms
+from mailbucket.search.quick import PAGE_SIZE, QuickHit, search_sources, sort_hits
 from mailbucket.settings import Preferences, load_preferences, save_preferences
 
 
@@ -141,6 +145,11 @@ def create_page() -> None:
     latest_progress: tuple[ProgressUpdate, float] | None = None
     displayed_progress: tuple[ProgressUpdate, float] | None = None
     manual_index_started = 0.0
+    quick_hits: list[QuickHit] = []
+    quick_selected: set[tuple[str, int, str]] = set()
+    quick_page = 0
+    quick_active_term = ""
+    quick_active_fields: tuple[str, ...] = ()
 
     def report(update: ProgressUpdate):
         nonlocal latest_progress
@@ -309,6 +318,36 @@ def create_page() -> None:
             IndexState.ERROR: ("Indexfehler", "negative"),
         }[info.state]
 
+    def clear_quick_results():
+        nonlocal quick_page, quick_active_term, quick_active_fields
+        quick_hits.clear()
+        quick_selected.clear()
+        quick_page = 0
+        quick_active_term = ""
+        quick_active_fields = ()
+        quick_selection_label.text = "0 Treffer ausgewählt"
+        quick_result_list.refresh()
+
+    def update_quick_source_options():
+        choices = {"all": "Alle ausgewählten Quellen"}
+        choices.update({str(path): str(path) for path, selected in sources.items() if selected})
+        quick_source.options = choices
+        if quick_source.value not in choices:
+            quick_source.value = "all"
+        quick_source.update()
+
+    def change_source_selection(path: Path, selected: bool):
+        sources[path] = selected
+        update_quick_source_options()
+        clear_quick_results()
+
+    def remove_source(path: Path):
+        sources.pop(path, None)
+        source_indexes.pop(path, None)
+        update_quick_source_options()
+        clear_quick_results()
+        source_list.refresh()
+
     @ui.refreshable
     def source_list():
         if not sources:
@@ -323,15 +362,11 @@ def create_page() -> None:
                     ui.checkbox(
                         str(path),
                         value=sources[path],
-                        on_change=lambda e, p=path: sources.__setitem__(p, e.value),
+                        on_change=lambda e, p=path: change_source_selection(p, e.value),
                     ).classes("grow break-all")
-
-                    def remove(p=path):
-                        sources.pop(p, None)
-                        source_indexes.pop(p, None)
-                        source_list.refresh()
-
-                    ui.button(icon="close", on_click=remove).props("flat round dense")
+                    ui.button(icon="close", on_click=lambda p=path: remove_source(p)).props(
+                        "flat round dense"
+                    )
                 with ui.row().classes("items-center gap-3"):
                     ui.badge(label, color=color).props("outline")
                     if info and info.mail_count:
@@ -400,6 +435,7 @@ def create_page() -> None:
         if busy or not paths:
             return
         busy = True
+        clear_quick_results()
         dry_button.disable()
         export_button.disable()
         form.props("inert").style("opacity: .65")
@@ -435,6 +471,7 @@ def create_page() -> None:
 
     async def delete_index(path: Path, info: IndexInfo):
         await run.io_bound(index_manager.delete_index, info)
+        clear_quick_results()
         source_indexes[path] = await run.io_bound(index_manager.status, path)
         source_list.refresh()
         await refresh_stored_indexes()
@@ -442,6 +479,7 @@ def create_page() -> None:
 
     async def delete_stored_index(info: IndexInfo):
         await run.io_bound(index_manager.delete_index, info)
+        clear_quick_results()
         for path in list(source_indexes):
             if source_indexes[path].source_id == info.source_id:
                 source_indexes[path] = await run.io_bound(index_manager.status, path)
@@ -453,6 +491,8 @@ def create_page() -> None:
         path = await pick_path()
         if path:
             sources[path] = True
+            update_quick_source_options()
+            clear_quick_results()
             source_list.refresh()
             await check_source_index(path)
 
@@ -490,23 +530,216 @@ def create_page() -> None:
         if path:
             output_input.value = str(path)
 
-    async def start(dry: bool):
+    def set_quick_selected(hit: QuickHit, selected: bool):
+        if selected:
+            quick_selected.add(hit.key)
+        else:
+            quick_selected.discard(hit.key)
+        quick_selection_label.text = f"{len(quick_selected):,} Treffer ausgewählt"
+
+    def select_all_quick():
+        quick_selected.update(hit.key for hit in quick_hits)
+        quick_result_list.refresh()
+
+    def clear_quick_selection():
+        quick_selected.clear()
+        quick_result_list.refresh()
+
+    def change_quick_page(delta: int):
+        nonlocal quick_page
+        maximum = max(0, (len(quick_hits) - 1) // PAGE_SIZE)
+        quick_page = min(maximum, max(0, quick_page + delta))
+        quick_result_list.refresh()
+
+    def change_quick_sort():
+        nonlocal quick_page
+        quick_page = 0
+        quick_result_list.refresh()
+
+    async def show_quick_preview(hit: QuickHit):
+        quick_status.text = "Vorschau wird geladen …"
+        try:
+            mail = await run.io_bound(index_manager.get_mail, hit.source, hit.record_id)
+            if mail.raw_sha256 != hit.raw_sha256:
+                raise RuntimeError("Die Nachricht wurde seit der Suche verändert.")
+        except Exception as error:
+            quick_status.text = "Vorschau konnte nicht geöffnet werden"
+            ui.notify(str(error), type="negative", timeout=8000)
+            return
+        quick_preview_content.clear()
+        with quick_preview_content:
+            ui.label(mail.subject or "(Ohne Betreff)").classes("text-xl font-semibold")
+            ui.label(f"Von: {mail.sender}")
+            ui.label(f"An: {', '.join(mail.to)}")
+            ui.label(f"Datum: {mail.date or mail.date_raw or 'Unbekannt'}")
+            ui.label(f"Quelle: {hit.source}").classes("break-all text-sm text-slate-500")
+            if mail.attachments:
+                ui.label("Anhänge: " + ", ".join(item.filename for item in mail.attachments))
+            ui.separator()
+            with ui.scroll_area().classes("w-full h-96"):
+                ui.label(mail.body_text or "(Kein Klartext vorhanden)").classes(
+                    "whitespace-pre-wrap break-words"
+                )
+        quick_preview_dialog.open()
+        quick_status.text = f"Suche abgeschlossen: {len(quick_hits):,} Treffer"
+
+    @ui.refreshable
+    def quick_result_list():
+        def preview_callback(item: QuickHit):
+            async def open_preview():
+                await show_quick_preview(item)
+
+            return open_preview
+
+        if not quick_active_term:
+            ui.label("Suchbegriff eingeben und auf „Suchen“ klicken.").classes("text-slate-500")
+            return
+        ui.label(f"{len(quick_hits):,} Treffer für „{quick_active_term}“").classes("font-medium")
+        if not quick_hits:
+            ui.label("Keine passenden Nachrichten gefunden.").classes("text-slate-500")
+            return
+        with ui.row().classes("items-center gap-3 flex-wrap"):
+            quick_selection_label.text = f"{len(quick_selected):,} Treffer ausgewählt"
+            ui.button("Alle Treffer auswählen", on_click=select_all_quick).props("flat dense")
+            ui.button("Auswahl aufheben", on_click=clear_quick_selection).props("flat dense")
+        ordered = sort_hits(quick_hits, quick_sort.value)
+        first = quick_page * PAGE_SIZE
+        for hit in ordered[first : first + PAGE_SIZE]:
+            with ui.row().classes(
+                "w-full items-start gap-3 flex-nowrap border-b border-slate-200 py-2"
+            ):
+                ui.checkbox(
+                    value=hit.key in quick_selected,
+                    on_change=lambda e, item=hit: set_quick_selected(item, e.value),
+                ).props("dense").classes("shrink-0")
+                with ui.column().classes("grow min-w-0 gap-1"):
+                    ui.button(
+                        hit.subject or "(Ohne Betreff)",
+                        on_click=preview_callback(hit),
+                    ).props("flat no-caps dense align=left").classes("text-left break-words")
+                    date = hit.date.strftime("%d.%m.%Y %H:%M") if hit.date else "Datum unbekannt"
+                    ui.label(f"{hit.sender} · {date}").classes("text-sm break-words")
+                    ui.label(f"{hit.source.name} · {hit.folder}").classes(
+                        "text-xs text-slate-500 break-all"
+                    )
+                    if hit.snippet:
+                        ui.label(hit.snippet).classes("text-sm text-slate-600 break-words")
+                    ui.label("Fundstelle: " + ", ".join(hit.locations)).classes(
+                        "text-xs text-slate-500"
+                    )
+        pages = (len(quick_hits) + PAGE_SIZE - 1) // PAGE_SIZE
+        with ui.row().classes("items-center gap-3"):
+            ui.button("Zurück", on_click=lambda: change_quick_page(-1)).props(
+                "outline dense"
+            ).set_enabled(quick_page > 0)
+            ui.label(f"Seite {quick_page + 1} von {pages}")
+            ui.button("Weiter", on_click=lambda: change_quick_page(1)).props(
+                "outline dense"
+            ).set_enabled(quick_page + 1 < pages)
+
+    async def quick_search():
+        nonlocal busy, manual_index_started, quick_active_fields, quick_active_term, quick_page
+        if busy:
+            return
+        term = (quick_input.value or "").strip()
+        if not term:
+            ui.notify("Bitte einen Suchbegriff eingeben.", type="warning")
+            return
+        selected_paths = [path for path, selected in sources.items() if selected]
+        if quick_source.value != "all":
+            selected_paths = [path for path in selected_paths if str(path) == quick_source.value]
+        if not selected_paths:
+            ui.notify("Bitte mindestens eine Quelle auswählen.", type="warning")
+            return
+        fields = SEARCH_FIELDS if quick_field.value == "all" else (quick_field.value,)
+        busy = True
+        dry_button.disable()
+        export_button.disable()
+        form.props("inert").style("opacity: .65")
+        clear_quick_results()
+        quick_status.text = "Lokale Indizes prüfen …"
+        try:
+            ready = []
+            skipped = []
+            for path in selected_paths:
+                info = await run.io_bound(index_manager.status, path)
+                if info.state != IndexState.CURRENT and auto_index.value:
+                    quick_status.text = f"Index erstellen: {path.name}"
+                    manual_index_started = monotonic()
+                    building_indexes.add(path)
+                    source_list.refresh()
+                    try:
+                        info = await run.io_bound(
+                            index_manager.build, path, on_progress=report_manual_index
+                        )
+                    finally:
+                        building_indexes.discard(path)
+                source_indexes[path] = info
+                if info.state == IndexState.CURRENT:
+                    ready.append(path)
+                else:
+                    skipped.append(path.name)
+            source_list.refresh()
+            await refresh_stored_indexes()
+            if not ready:
+                raise RuntimeError("Keine aktuelle Indexquelle verfügbar. Bitte Index erstellen.")
+            quick_status.text = "Index durchsuchen …"
+            found = await run.io_bound(indexed_quick_search, ready, term, fields)
+            quick_hits.extend(found)
+            quick_active_term = term
+            quick_active_fields = fields
+            quick_page = 0
+            quick_result_list.refresh()
+            quick_status.text = f"Suche abgeschlossen: {len(found):,} Treffer"
+            if skipped:
+                ui.notify(
+                    "Ohne aktuellen Index übersprungen: " + ", ".join(skipped), type="warning"
+                )
+        except Exception as error:
+            quick_status.text = "Schnellsuche fehlgeschlagen"
+            ui.notify(str(error), type="negative", timeout=10000)
+        finally:
+            busy = False
+            dry_button.enable()
+            export_button.enable()
+            form.props(remove="inert").style(remove="opacity: .65")
+
+    def indexed_quick_search(paths: list[Path], term: str, fields: tuple[str, ...]):
+        return search_sources(index_manager, paths, term, fields)
+
+    async def start(dry: bool, selected_only: bool = False):
         nonlocal busy, displayed_progress, last_result, latest_progress
         if busy:
             return
         try:
+            if selected_only:
+                chosen = [hit for hit in quick_hits if hit.key in quick_selected]
+                if not chosen:
+                    raise ValueError("Bitte zuerst Treffer in der Schnellsuche auswählen.")
+                selected_records: dict[str, dict[int, str]] = {}
+                for hit in chosen:
+                    selected_records.setdefault(hit.source_id, {})[hit.record_id] = hit.raw_sha256
+                run_sources = list(dict.fromkeys(hit.source for hit in chosen))
+                run_terms = [SearchTerm(quick_active_term, quick_active_term)]
+                run_fields = quick_active_fields
+            else:
+                selected_records = None
+                run_sources = [p for p, selected in sources.items() if selected]
+                run_terms = copy.deepcopy(mappings) if mappings else parse_terms(terms_input.value)
+                run_fields = tuple(f for f, widget in field_widgets.items() if widget.value)
             config = RunConfig(
-                sources=[p for p, selected in sources.items() if selected],
-                terms=copy.deepcopy(mappings) if mappings else parse_terms(terms_input.value),
+                sources=run_sources,
+                terms=run_terms,
                 output_dir=Path(output_input.value).expanduser().resolve(),
                 run_name=run_input.value,
-                search_fields=tuple(f for f, widget in field_widgets.items() if widget.value),
+                search_fields=run_fields,
                 deduplicate=dedup.value,
                 export=export_options(),
                 search_workers=int(search_workers.value),
                 export_workers=int(export_workers.value),
                 use_index=True,
-                auto_index=auto_index.value,
+                auto_index=auto_index.value and not selected_only,
+                selected_index_records=selected_records,
             )
             config.validate()
             save_settings(notify=False)
@@ -602,6 +835,54 @@ def create_page() -> None:
                         icon="refresh",
                         on_click=refresh_stored_indexes,
                     ).props("flat")
+            with ui.card().classes("w-full p-5 gap-3"):
+                ui.label("SCHNELLSUCHE IM INDEX").classes("section-title")
+                ui.label(
+                    "Eine Mail suchen, Treffer ansehen und bei Bedarf einzeln als PDF exportieren."
+                ).classes("text-slate-600")
+                with ui.row().classes("w-full items-end gap-3"):
+                    quick_input = (
+                        ui.input("Suchbegriff", placeholder="Betreff, Name, Inhalt oder Anhangtext")
+                        .props("outlined clearable")
+                        .classes("grow min-w-64")
+                    )
+                    quick_input.on("keydown.enter", quick_search)
+                    ui.button("Suchen", icon="search", on_click=quick_search).props("size=lg")
+                with ui.row().classes("w-full gap-3"):
+                    quick_source = ui.select(
+                        {"all": "Alle ausgewählten Quellen"},
+                        value="all",
+                        label="Quelle",
+                    ).classes("flex-1 min-w-52")
+                    quick_field = ui.select(
+                        {"all": "Alle Suchfelder", **SEARCH_LABELS},
+                        value="all",
+                        label="Suchfeld",
+                    ).classes("flex-1 min-w-52")
+                    quick_sort = ui.select(
+                        {
+                            "relevance": "Relevanz",
+                            "newest": "Neueste zuerst",
+                            "oldest": "Älteste zuerst",
+                        },
+                        value="relevance",
+                        label="Sortierung",
+                        on_change=change_quick_sort,
+                    ).classes("flex-1 min-w-52")
+                ui.label(
+                    "Relevanz bevorzugt Treffer im Betreff und Absender; bei Gleichstand entscheidet das Datum."
+                ).classes("text-xs text-slate-500")
+                quick_status = ui.label("Bereit für eine Suche.").classes("text-slate-600")
+                quick_selection_label = ui.label("0 Treffer ausgewählt").classes("text-sm")
+                quick_result_list()
+                ui.button(
+                    "Ausgewählte Treffer als PDF exportieren",
+                    icon="picture_as_pdf",
+                    on_click=lambda: start(False, selected_only=True),
+                ).props("outline")
+                with ui.dialog() as quick_preview_dialog, ui.card().classes("w-[850px] max-w-full"):
+                    quick_preview_content = ui.column().classes("w-full")
+                    ui.button("Schließen", on_click=quick_preview_dialog.close).props("flat")
             with ui.row().classes("w-full items-stretch gap-5"):
                 with ui.card().classes("flex-1 min-w-72 p-5"):
                     ui.label("02  SUCHBEGRIFFE").classes("section-title")

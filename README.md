@@ -47,6 +47,8 @@ mailbucket
 - Fortschrittsanzeige mit Datenmenge, Laufzeit, Durchsatz und geschätzter Restzeit.
 - Persistente lokale SQLite-/FTS5-Indizes pro Quelle; aktuelle Indizes werden bei
   späteren Suchen wiederverwendet, ohne das gesamte Archiv erneut zu parsen.
+- Schnellsuche mit Trefferliste, Vorschau, Quell- und Suchfeldfilter, Sortierung nach
+  Relevanz oder Datum und PDF-Export ausgewählter Nachrichten.
 - Einstellbare Parallelität für Suche (1–8 Worker) und PDF-Ablage (1–4 Worker).
 - Lokales Logo, gespeicherte Such-/Exportoptionen und Auswahlhilfen für PDF-Einstellungen.
 
@@ -284,6 +286,26 @@ Für portable Installationen und Tests kann `MAILBUCKET_INDEX_PATH` auf ein ande
 Indexverzeichnis gesetzt werden. Die Indizes enthalten lokale Mailinhalte und
 Quellpfade und sollten deshalb wie die Archive selbst geschützt und nicht ungeprüft
 weitergegeben werden. MailBucket überträgt diese Daten nicht ins Netzwerk.
+
+### Schnellsuche und Trefferliste
+
+Im Bereich **Schnellsuche im Index** einen Begriff eingeben und **Suchen** drücken.
+Die Suche berücksichtigt die ausgewählten Quellen. Quelle und Suchfeld lassen sich
+zusätzlich eingrenzen. Fehlt ein aktueller Index, wird er bei aktivierter automatischer
+Indexierung zuerst erstellt oder aktualisiert; andernfalls wird die betreffende Quelle
+übersprungen. Treffer erscheinen in Seiten mit jeweils 20 Nachrichten. Ein Klick auf
+den Betreff öffnet eine lokale Textvorschau mit Maildaten und Anhangnamen.
+
+Die Sortierung bietet **Relevanz**, **Neueste zuerst** und **Älteste zuerst**.
+Relevanz ist eine einfache Gewichtung der Fundstellen: Betreff und Absender zählen
+stärker als Nachrichtentext oder Anhanginhalt. Sie ist keine semantische KI-Suche.
+Ausgewählte Treffer bleiben beim Blättern erhalten. Mit **Alle Treffer auswählen**
+werden auch Treffer anderer Seiten markiert; **Auswahl aufheben** entfernt die Markierung.
+
+**Ausgewählte Treffer als PDF exportieren** verwendet die Optionen aus den Bereichen
+**04 Ausgabe** bis **07 PDF-Fußzeile**. Es werden ausschließlich die markierten Mails
+exportiert. Wenn sich eine Quelle oder ein Index seit der Schnellsuche verändert hat,
+wird der Export mit einem Hinweis abgebrochen; dann die Suche erneut ausführen.
 
 ## Suchfelder und Fundstellen
 

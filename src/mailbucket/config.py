@@ -143,6 +143,7 @@ class RunConfig:
     export_workers: int = field(default_factory=default_export_workers)
     use_index: bool = False
     auto_index: bool = True
+    selected_index_records: dict[str, dict[int, str]] | None = None
 
     def validate(self) -> None:
         if not self.sources:
@@ -170,4 +171,18 @@ class RunConfig:
             )
         if type(self.use_index) is not bool or type(self.auto_index) is not bool:
             raise ValueError("Indexoptionen müssen boolesche Werte sein.")
+        if self.selected_index_records is not None:
+            if (
+                not self.use_index
+                or not self.selected_index_records
+                or any(
+                    not records
+                    or any(
+                        type(record_id) is not int or not digest
+                        for record_id, digest in records.items()
+                    )
+                    for records in self.selected_index_records.values()
+                )
+            ):
+                raise ValueError("Ungültige Auswahl indizierter Nachrichten.")
         self.export.validate()
