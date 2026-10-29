@@ -169,7 +169,8 @@ def test_only_hit_buckets_get_excel_csv(tmp_path, make_mail):
     assert rows[0]["Uhrzeit"] == "08:31:42"
     assert "Alice Müller" in rows[0]["von"]
     assert "bob@example.com" in rows[0]["an"]
-    assert "Erste Zeile; mit Semikolon\nZweite Zeile mit Umlaut ä" in rows[0]["Text"]
+    assert rows[0]["Text"] == "Erste Zeile; mit Semikolon Zweite Zeile mit Umlaut ä"
+    assert len(csv_path.read_text(encoding="utf-8-sig").splitlines()) == 2
 
 
 def test_progress_reports_bytes_timing_and_worker_counts(tmp_path, make_mail):
